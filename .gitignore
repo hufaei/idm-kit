@@ -1,0 +1,6 @@
+*.log
+*.bak
+export/
+test/
+samples/
+__pycache__/
