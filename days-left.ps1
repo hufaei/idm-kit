@@ -77,8 +77,10 @@ if ($null -eq $limit) {
     }
 }
 
-$remain = [uint32]([int64]$limit - $used)
-if ([int64]$limit - $used -lt 0) { $remain = 0 }
+# 先在 64 位下做减法再转换：Therad 异常大于上限时 [uint32] 负数会直接抛异常，
+# 所以负数判断必须发生在类型转换之前。
+$rem64  = [int64]$limit - $used
+$remain = if ($rem64 -lt 0) { [uint32]0 } else { [uint32]$rem64 }
 
 Write-Host ("上限 : {0}" -f $limit)
 Write-Host ("已用 : {0}" -f $used)

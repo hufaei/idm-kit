@@ -62,8 +62,13 @@ $anchorA = [byte[]]@(0xA1,0x24,0xBD,0x77,0x00,0xF7,0xD8,0x1B,0xC0,
 $oldA    = [byte[]]@(0x83,0xE0,0x0F,0x83,0xC0,0x0F)
 $newA    = [byte[]]@(0xB8) + $imm + [byte[]]@(0x90)
 
-# B: .data default of [0x77bd28]; anchored by fixed file offset + byte check.
-$offB    = 0x379528
+# B: .data default of [0x77bd28]. Anchored by an 8-byte run that sits AFTER
+#    the target, never by a hardcoded file offset. The run holds two
+#    linked-base pointers (0x699338, 0x6A03D0) and is unique in the file both
+#    before and after patching (verified on build 15). It must NOT include the
+#    patched dword itself, or the anchor would vanish once the patch is applied.
+$anchorB = [byte[]]@(0x38,0x93,0x69,0x00, 0xD0,0x03,0x6A,0x00)
+$bDelta  = -4              # the patch target sits 4 bytes BEFORE the anchor
 $oldB    = [byte[]]@(0x1E,0x00,0x00,0x00)
 $newB    = $imm
 
@@ -100,6 +105,13 @@ $patchedA = 'AC81B41812EE1BABC3B7E0D606012C706D598ED27B9610E24563494D9D1E8D58'
 if (-not $Force -and $hash -ne $pristine -and $hash -ne $patchedA) {
     throw "unverified build (sha256 not recognised). Re-run with -Force if sure."
 }
+# Idempotency: once patched, the original anchor A no longer exists, so a second
+# run would fail at the anchor check. The patched hash is decisive, so short out.
+if ($hash -eq $patchedA) {
+    Write-Host 'already patched: this file matches the patched build, nothing to do.' -ForegroundColor Green
+    Write-Host 'rollback: -Revert'
+    return
+}
 
 $bytes = [IO.File]::ReadAllBytes($exeFull)
 
@@ -126,6 +138,17 @@ if ($alreadyA) {
 }
 
 # ---------- patch B ----------
+$hitsB = New-Object 'Collections.Generic.List[int]'
+$p = 0
+while ($true) {
+    $i = Find-Bytes -Hay $bytes -Needle $anchorB -Start $p
+    if ($i -lt 0) { break }
+    $hitsB.Add($i); $p = $i + 1
+}
+if ($hitsB.Count -ne 1) { throw "anchor B hit count = $($hitsB.Count) (need exactly 1). Aborted, untouched." }
+$offB = $hitsB[0] + $bDelta
+Write-Host ("B      : anchor at 0x{0:X}, target 0x{1:X}" -f ($hitsB[0]), $offB)
+
 $curB = $bytes[$offB..($offB + 3)]
 $alreadyB = ($curB -join ',') -eq ($newB -join ',')
 if ($alreadyB) {
