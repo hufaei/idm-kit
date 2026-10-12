@@ -94,6 +94,22 @@ A3 28BD7700   mov [0x77bd28],eax   -> disp32 位于 RVA 0x4CF47
 
 ## 脚本用法
 
+### 首次使用：先解除文件锁定
+
+通过浏览器下载 zip 再解压出来的脚本带 `Zone.Identifier` 标记（`ZoneId=3`），在 Windows 默认的 `RemoteSigned` 策略下会被直接拒绝执行：
+
+```
+SecurityError: 无法加载文件 ...。文件 ... 未进行数字签名。无法在当前系统上运行此脚本。
+```
+
+这是部署链路上第一个会失败的地方，也是最容易让人误以为"脚本坏了"的地方。解除方式：
+
+```powershell
+Get-ChildItem -Recurse | Unblock-File
+```
+
+`Unblock-File` 是命令而不是脚本，不受执行策略约束，所以在被阻止的状态下依然能执行——这一点保证了用户不会陷入死锁。另一个等效做法是改用 `powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1` 启动。
+
 ### bootstrap.ps1
 
 ```powershell
