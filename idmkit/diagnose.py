@@ -276,12 +276,25 @@ def _check_update() -> Check:
     )
 
 
-def _check_process(procs: list[runtime.ProcInfo]) -> tuple[Check, runtime.ProcInfo | None]:
+def _check_process(
+    procs: list[runtime.ProcInfo], total: int = 0
+) -> tuple[Check, runtime.ProcInfo | None]:
     idm = next((p for p in procs if p.name == "IDMan"), None)
+
+    # 扫描范围只在异常时才说出口。正常桌面有数百个进程，读得到就没必要
+    # 打扰用户；一旦数字偏小，就说明进程视图被限制了，此时"看不到 IDM"
+    # 和"IDM 没运行"是两回事，必须讲清楚。
+    if total < 0:
+        scope = "（进程列表读取失败）"
+    elif total < 100:
+        scope = f"（只扫描到 {total} 个进程，少于正常值，运行环境受限）"
+    else:
+        scope = ""
+
     if idm is None:
         return Check(
             "process", "IDM 进程", STATUS_INFO,
-            fact="IDM 当前没有运行",
+            fact=f"IDM 当前没有运行 {scope}",
             meaning="要处理文件或使用下载功能时需要启动它",
             action="点击「启动 IDM」",
         ), None
@@ -290,7 +303,7 @@ def _check_process(procs: list[runtime.ProcInfo]) -> tuple[Check, runtime.ProcIn
     extra = f"（同时运行：{', '.join(others)}）" if others else ""
     return Check(
         "process", "IDM 进程", STATUS_OK,
-        fact=f"正在运行，pid {idm.pid}，权限 {idm.integrity_label}{extra}",
+        fact=f"正在运行，pid {idm.pid}，权限 {idm.integrity_label}{extra} {scope}",
         meaning="进程正常",
     ), idm
 
@@ -477,7 +490,8 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
     checks.append(_check_update())
 
     procs = runtime.running_processes()
-    proc_check, idm_proc = _check_process(procs)
+    total = runtime.total_process_count()
+    proc_check, idm_proc = _check_process(procs, total)
     checks.append(proc_check)
     checks.append(_check_integrity(idm_proc))
     checks.append(_check_channel(idm_proc))
@@ -491,6 +505,7 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
         "windows": f"{platform.system()} {platform.release()} ({platform.version()})",
         "python": sys.version.split()[0],
         "frozen": bool(getattr(sys, "frozen", False)),
+        "process_total": total,
         "elevated": runtime.is_elevated(),
         "user": os.environ.get("USERNAME", ""),
         "computer": os.environ.get("COMPUTERNAME", ""),

@@ -199,6 +199,32 @@ def _list_pids(name: str) -> list[int]:
     return pids
 
 
+def total_process_count() -> int:
+    """当前可见的进程总数，读不到返回 -1。
+
+    这是自检用的：正常 Windows 桌面有数百个进程。如果这个数字明显偏小，
+    说明本进程的进程视图被限制了，那"看不到 IDM"就不是 IDM 没运行，
+    而是根本读不到完整进程表 —— 两种情况在界面上必须能区分开。
+    """
+    snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == _INVALID_HANDLE:
+        return -1
+
+    entry = _PROCESSENTRY32()
+    entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
+    count = 0
+    try:
+        if not _k32.Process32First(snap, ctypes.byref(entry)):
+            return -1
+        while True:
+            count += 1
+            if not _k32.Process32Next(snap, ctypes.byref(entry)):
+                break
+    finally:
+        _k32.CloseHandle(snap)
+    return count
+
+
 def running_processes(names: tuple[str, ...] = C.IDM_PROCESSES) -> list[ProcInfo]:
     out: list[ProcInfo] = []
     for name in names:
