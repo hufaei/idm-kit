@@ -67,9 +67,36 @@ class App(tk.Tk):
 
         self.diag: diagnose.Diagnosis | None = None
         self.exe: Path | None = runtime.idm_exe()
+        self._watch_job: str | None = None
 
         self._build()
         self.refresh()
+
+        # IDM 默认开机自启，用户打开界面时它可能还没起来。只靠打开那一刻的
+        # 快照，按钮状态会一直是旧的：IDM 明明在跑，界面却让点「启动 IDM」。
+        self._watch_processes()
+        self.bind("<FocusIn>", self._on_focus)
+
+    def _watch_processes(self) -> None:
+        """低频同步按钮状态。
+
+        完整 refresh 要读文件、查注册表、跑 sc 查询，代价不小；但"进程在不在"
+        只要一次快照，很便宜，所以这里只刷按钮，不重跑诊断。
+        """
+        if not self.winfo_exists():
+            return
+        try:
+            self._sync_buttons()
+        except Exception:
+            pass
+        self._watch_job = self.after(3000, self._watch_processes)
+
+    def _on_focus(self, _event=None) -> None:
+        """切回窗口时对齐一次，省得用户等轮询周期。"""
+        try:
+            self._sync_buttons()
+        except Exception:
+            pass
 
     # ---- 构建 ----------------------------------------------------------
 
