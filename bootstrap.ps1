@@ -74,10 +74,17 @@ Start-Sleep -Seconds 3
 Write-Host ''
 Write-Host 'patch applied.' -ForegroundColor Green
 Write-Host ''
-Write-Host 'Two things matter from here:' -ForegroundColor Yellow
+Write-Host 'Browser extension:' -ForegroundColor Yellow
+Write-Host '  Chrome / Edge : installed together with IDM, nothing to do.'
+Write-Host '  Firefox       : install it by hand -- drag'
+Write-Host '                  idmmzcc3.xpi from the IDM install folder into Firefox.'
+Write-Host ''
+Write-Host 'Two things to remember:' -ForegroundColor Yellow
 Write-Host '  1. Start IDM as the NORMAL user, never as administrator. An elevated'
 Write-Host '     IDM cannot be reached by browsers (UIPI); the extension then reports'
 Write-Host '     "Cannot launch IDM" even though nothing is broken.'
 Write-Host '  2. Auto-update overwrites IDMan.exe and loses the patch, and there is no'
 Write-Host '     registry switch to disable it. Check state with .\verify.ps1;'
 Write-Host '     if it reports PRISTINE, re-run .\patch-IDM.ps1.'
+Write-Host ''
+Write-Host 'Plain-language guide: 使用说明.md'
