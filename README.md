@@ -160,10 +160,169 @@ IDM 自己的"剩余天数"提示框只在剩余 <= 15 天时才会自动弹（`
 ## 注意事项
 
 - 补丁后 Authenticode 签名变为 `HashMismatch`。Windows 加载器不靠证书有效性决定是否运行，程序照跑；Defender 实测未拦截。
-- **必须关掉 IDM 自动更新**，否则 Quick Update 会覆盖 `IDMan.exe`，补丁失效（只是退回试用态，不会损坏程序）。
+- **自动更新会覆盖 `IDMan.exe`，补丁随之失效。** 程序与数据不会受损。完整的后果说明与恢复步骤见「[自动更新：后果与恢复](#自动更新后果与恢复)」。
+- 这件事**没有注册表开关可关**，原因在该节里给出了反汇编证据。
 - 补丁不涉及注册流程，不需要屏蔽服务器域名。
 - 试用计数在 `HKCU\Software\DownloadManager\Therad`（REG_DWORD，已用天数），另有冗余备份键 `HKCU\Software\Classes\CLSID\{84797876-C678-1780-A556-0CD06786780F}`。
 - 脚本的失败策略：SHA256 不在白名单拒绝执行；锚点命中数不等于 1 拒绝执行；原字节不符拒绝执行。任何异常都发生在写入之前，文件保持原样。
+
+## 自动更新：后果与恢复
+
+### 事实基础
+
+IDM 会定期自动检查更新，这个行为写死在程序里。二进制中的原文：
+
+```
+IDM checks for a new release every 2 weeks by requesting an update page from its home site.
+A: CheckUpdtVM     A: LastCheckQU     A: LstCheck
+```
+
+Quick Update 的产物是**替换 `IDMan.exe` 本身**，所以它一旦跑起来，补丁就被抹掉了。
+
+**这件事没有注册表开关可以关。** 结论是确定的，排查过程如下。
+
+二进制里唯一像开关的值名是 `CheckUpdtVM`。反汇编它的唯一引用点（`0x45A4CC`）：
+
+```asm
+0x0045A499  mov  ax,  word ptr [0x698900]   ; 数据区内容 31 30 00 = "10"
+0x0045A49F  mov  cl,  byte ptr [0x698902]
+0x0045A4A5  mov  word ptr [esp], ax
+0x0045A4AC  mov  byte ptr [esp+2], cl       ; 在栈上拼出字符串 "10"
+0x0045A4CC  push 0x6a2550                   ; "CheckUpdtVM"
+0x0045A4D2  call dword ptr [0x695090]
+```
+
+它把字符串 `"10"` **写进去**，而不是读出来做真假判断——这是一个**状态标记**，不是布尔开关。所以在脚本里实现"改注册表关闭自动更新"不具备可行性；写一个语义未经证实的值进去，只会伪造出一种"已经关掉了"的假象。
+
+### 不关会怎样
+
+| 情况 | 后果 |
+|---|---|
+| 被同 build 覆盖 | 补丁失效，退回 30 天试用态。程序、下载数据、注册表配置均不受损 |
+| 更新到更新的 build | 同上，且 `patch-IDM.ps1` 会**拒绝执行**（SHA256 不在白名单）。这是设计意图：绝不往未知二进制里写字节 |
+
+两种情况都不会损坏程序，也不会丢已完成的任务。
+
+### 怎么发现
+
+```powershell
+.\verify.ps1
+```
+
+看 `state` 一行：
+
+| `state` 输出 | 含义 |
+|---|---|
+| `PATCHED` | 补丁在位，无需动作 |
+| `PRISTINE (untouched official build)` | 被同 build 覆盖了，补丁已失效 |
+| `UNKNOWN build (not in allowlist)` | 更新到了别的 build |
+
+### 怎么恢复
+
+**情况 A：`state: PRISTINE`**（被同版本覆盖）
+
+```powershell
+# 管理员身份
+.\patch-IDM.ps1
+```
+
+几秒完成。锚点重新搜索，不依赖任何写死的偏移。
+
+**情况 B：`state: UNKNOWN build`**（更新到了新版本）
+
+此时补丁脚本会主动拒绝执行，需要退回已知版本：
+
+```powershell
+# 1. 卸载当前 IDM（控制面板，或安装目录的 Uninstall.exe）
+# 2. 用留存的官方安装包重装并打补丁（管理员身份）
+.\bootstrap.ps1 -SkipDownload
+```
+
+`-SkipDownload` 表示不重新下载，直接用 `-WorkDir`（默认 `%TEMP%\idm-kit`）里已有的安装包；**SHA256 校验依然强制执行**，文件不对会在安装前中止。
+
+### 预防
+
+按可靠性排序：
+
+1. 定期跑 `.\verify.ps1`。这是最可靠的一道保险——无论 IDM 以什么方式更新，补丁状态一测便知，恢复只需一条命令。
+2. 在 IDM 的界面选项里关掉自动检查更新（若有该开关）。这是常规做法，不依赖任何未验证的注册表值。
+3. 把 `IDMan.exe` 设为只读，让更新写入失败。**可行性未经验证**，可能干扰 IDM 自身的正常行为，故未写入脚本。
+
+## 浏览器集成：扩展报 "Cannot launch IDM"
+
+### 症状
+
+装好 IDM、打完补丁、IDM 自己下载完全正常，但浏览器里的 IDM 扩展失效。Chrome 与 Firefox 同时报出同一句话：
+
+```
+Internet Download Manager extension for Chrome/Firefox has been installed.
+Error: Cannot launch IDM, either IDM application is not installed, or some of its files are corrupted
+```
+
+**这句话是误报**——IDM 装得好好的。
+
+### 机制
+
+扩展的连接逻辑（`background.js`）是先连本机端口，失败才回落到 native messaging：
+
+```javascript
+La = ["127.0.0.1:1001", "0.1.0.1:1001"]
+...
+if (a < La.length) {
+    a = this.S = new WebSocket(`ws://${La[a]}/?cid=…&rnd=…`,
+                               "plugin.v3.internetdownloadmanager.com");
+} else {
+    a = this.S = browser.runtime.connectNative("com.tonec.idm");   // 兜底
+}
+```
+
+也就是说 **IDM 6.42+ 的集成主通道是本机 1001 端口上的 WebSocket**，native messaging 只是备胎。所以 Chrome 和 Firefox 会一起挂——它们连的是同一个端点。
+
+该端点由 IDM 的网络过滤驱动（`IDMWFP` / `idmwfp.sys`）监听，并且做 **Origin 白名单校验**。实测（同一台机器、逐一改变量）：
+
+```
+Origin: chrome-extension://ngpampappnmepgilojfohadhhmbhlaek  ->  HTTP/1.1 101 Switching Protocols
+Origin: http://127.0.0.1:8812                                ->  连接被重置
+不带 Origin                                                  ->  连接被重置
+带 permessage-deflate / Sec-Fetch-*                          ->  不影响结果
+```
+
+**唯一决定成败的是 Origin。** 只有扩展身份能连上，用普通网页或脚本去探测 1001 一律被拒——所以不要拿一个自建网页当作"扩展失效"的证据，那种测试从设计上就不可能通过。
+
+### 真正的原因：IDM 不能以管理员身份运行
+
+如果 IDM 是**以管理员权限**启动的，浏览器（中等完整性级别）会因 Windows 的 UIPI 规则无法与它建立这条通道，1001 直接重置连接。
+
+对照实测：
+
+| IDM 进程权限 | 从正确 Origin 发起连接的结果 |
+|---|---|
+| 管理员（High IL） | 连接被重置 |
+| 普通用户（Medium IL） | `HTTP/1.1 101 Switching Protocols` |
+
+这也解释了安装目录里 `MediumILStart.exe` 的用途——IDM 官方为此专门准备了一个"以中等完整性级别启动"的工具。
+
+> 注意：**打补丁的脚本本身是提权运行的**，它停掉又重启 IDM 时，IDM 会继承管理员令牌，从而触发这个问题。打完补丁后，请以普通用户身份启动 IDM。
+
+### 修法
+
+1. 右击 IDM 快捷方式 → 属性 → 兼容性，确认**没有**勾选"以管理员身份运行"。
+2. 不要从管理员权限的终端里启动 `IDMan.exe`。
+3. 关掉 IDM 后重新以普通用户身份启动它。
+
+IDM 自己开机自启（`HKCU\Software\DownloadManager\LaunchOnStart = 1`）走的是普通用户权限，那条路径是正常的。
+
+### 怎么确认修好了
+
+一次真实的浏览器下载，看 IDM 是否接管。判定依据是**服务端是否收到多个并发 Range 请求**——那是 IDM 多线程分段下载的指纹，浏览器自身下载是顺序单流：
+
+```
+[xx] /dl  Range=bytes=233600-8388607     ← 线程 1
+[xx] /dl  Range=bytes=233600-            ← 线程 1 续传
+[xx] /dl  Range=bytes=4316943-           ← 线程 2，从不同偏移开始
+```
+
+或者直接查 IDM 主窗口的下载列表，以及文件是否完整落盘。
 
 ## 文件
 

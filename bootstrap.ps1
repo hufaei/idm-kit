@@ -35,16 +35,19 @@ if (-not (Test-Path -LiteralPath $PatchScript)) { throw "missing patch-IDM.ps1 n
 
 if (-not (Test-Path -LiteralPath $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
 
-if (-not $SkipDownload) {
-    if (-not (Test-Path -LiteralPath $Installer)) {
-        Write-Host "downloading: $InstallerUrl"
-        Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing
-    }
-    $h = (Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash
-    Write-Host "installer sha256: $h"
-    if ($h -ne $InstallerSha) { throw "installer hash mismatch.`nexpected $InstallerSha`ngot      $h" }
-    Write-Host 'installer verified'
+if (-not $SkipDownload -and -not (Test-Path -LiteralPath $Installer)) {
+    Write-Host "downloading: $InstallerUrl"
+    Invoke-WebRequest -Uri $InstallerUrl -OutFile $Installer -UseBasicParsing
 }
+
+# Verify unconditionally, including under -SkipDownload: that switch means
+# "do not fetch", not "trust whatever is already on disk". Without this the
+# allowlist silently stops applying to any pre-placed installer.
+if (-not (Test-Path -LiteralPath $Installer)) { throw "installer not found: $Installer" }
+$h = (Get-FileHash -LiteralPath $Installer -Algorithm SHA256).Hash
+Write-Host "installer sha256: $h"
+if ($h -ne $InstallerSha) { throw "installer hash mismatch.`nexpected $InstallerSha`ngot      $h" }
+Write-Host 'installer verified'
 
 if (-not $SkipInstall) {
     if (Test-Path -LiteralPath $ExePath) {
