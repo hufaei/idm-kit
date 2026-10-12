@@ -60,7 +60,11 @@ def _is_writable(path: Path) -> bool:
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("IDM 工具")
+
+        # 权限状态直接写进标题。普通权限下进程表可能是残缺的（实测只扫到
+        # 23 个进程），关闭 IDM 这类操作用管理员身份运行才不会遇到怪现象。
+        self.elevated = runtime.is_elevated()
+        self.title("IDM 工具（管理员）" if self.elevated else "IDM 工具（普通权限）")
         self.configure(bg=BG)
         self.geometry("680x620")
         self.minsize(620, 560)
@@ -452,6 +456,14 @@ class App(tk.Tk):
         if not messagebox.askokcancel("关闭 IDM", "将结束所有 IDM 相关进程。"):
             return
 
+        running, why = runtime.idm_running()
+
+        # 端口不通而且进程表里也没有 —— 那确实没什么可关的
+        if running is False:
+            messagebox.showinfo("没有需要关闭的", "IDM 当前没有运行。")
+            self.refresh()
+            return
+
         # 按映像名结束，而不是先枚举拿 PID。枚举结果受权限影响 —— 普通权限下
         # 可能一个都拿不到，那时循环体一次都不执行，用户看到的就是「点了没反应」。
         # 交给 taskkill 自己去找，它不需要我们先枚举。
@@ -476,19 +488,37 @@ class App(tk.Tk):
             elif result.returncode == 5:
                 blocked.append(name)
 
-        # 杀完再问一次端口：进程没了但通道还在，说明有别的东西占着
-        self.after(900, self.refresh)
+        if kicked:
+            self.after(900, self.refresh)
+            if blocked:
+                messagebox.showwarning(
+                    "部分未关闭",
+                    "以下进程拒绝访问：\n" + "、".join(blocked),
+                )
+            return
 
-        if blocked:
-            messagebox.showwarning(
-                "部分未关闭",
-                "以下进程拒绝访问，需要管理员权限：\n" + "、".join(blocked),
-            )
-        elif not kicked:
-            messagebox.showinfo(
-                "没有需要关闭的",
-                "没有找到正在运行的 IDM 进程，它可能已经关掉了。",
-            )
+        # 一个都没杀到。如果端口说它明明在跑，那问题就不是「不存在」而是权限：
+        # 普通权限下进程表可能是残缺的，taskkill 看不到目标，只能回报「没找到」。
+        if running is True:
+            if not messagebox.askokcancel(
+                "需要管理员权限",
+                f"IDM 正在运行（{why}），但当前权限看不到它的进程，无法结束。\n\n"
+                "用管理员权限再试一次吗？会弹出授权提示。",
+            ):
+                return
+            ok, err = self._elevated_run(["--stop"])
+            if not ok:
+                messagebox.showerror("失败", err)
+                return
+            self.after(1800, self.refresh)
+            return
+
+        # 端口没监听、进程表也读不完整 —— 说不清，别硬给结论
+        messagebox.showinfo(
+            "没有找到",
+            "没有找到正在运行的 IDM 进程，它可能已经关掉了。",
+        )
+        self.refresh()
 
 
 def run() -> int:

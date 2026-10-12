@@ -134,6 +134,39 @@ def cmd_restore(quiet: bool) -> int:
     return 0
 
 
+def cmd_stop() -> int:
+    """结束所有 IDM 进程。
+
+    提权后调用。普通权限下进程表可能是残缺的，taskkill 会回报「没找到」，
+    但那是看不到而不是真没有；管理员权限才读得到完整进程表。
+    """
+    killed: list[str] = []
+    denied: list[str] = []
+
+    for name in C.IDM_PROCESSES:
+        try:
+            result = subprocess.run(
+                ["taskkill", "/IM", name + ".exe", "/F"],
+                capture_output=True, timeout=8,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            continue
+        if result.returncode == 0:
+            killed.append(name)
+        elif result.returncode == 5:
+            denied.append(name)
+
+    if killed:
+        _message("已关闭：\n\n" + "、".join(killed))
+        return 0
+    if denied:
+        _message("以下进程拒绝访问：\n\n" + "、".join(denied), error=True)
+        return 4
+    _message("没有找到正在运行的 IDM 进程。")
+    return 0
+
+
 def cmd_export() -> int:
     try:
         out = reporter.export()
@@ -163,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--restore", action="store_true", help="从备份还原为官方原版")
     g.add_argument("--export", action="store_true", help="导出诊断报告到桌面")
     g.add_argument("--check", action="store_true", help="在终端输出诊断报告")
+    g.add_argument("--stop", action="store_true", help="结束所有 IDM 进程（提权后使用）")
 
     p.add_argument(
         "--days", type=int, default=C.DEFAULT_DAYS,
@@ -183,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_export()
     if args.check:
         return cmd_check()
+    if args.stop:
+        return cmd_stop()
     return cmd_gui()
 
 
