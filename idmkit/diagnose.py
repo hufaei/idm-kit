@@ -353,6 +353,18 @@ def _check_integrity(idm: runtime.ProcInfo | None) -> Check:
 def _check_channel(idm: runtime.ProcInfo | None) -> Check:
     state = runtime.port_state()
     if state == "listening":
+        # 这个端口由 IDMWFP 驱动常驻占用（内核 pid 4），不代表 IDM 已启动。
+        # 驱动在 = 具备接管能力；真正接管还要求 IDMan.exe 在运行。
+        if idm is None:
+            return Check(
+                "channel", "浏览器通道", STATUS_WARN,
+                fact=f"127.0.0.1:{C.BROWSER_PORT} 在监听，但 IDM 没在运行",
+                meaning=(
+                    "这个端口是 IDMWFP 驱动常驻占用的，驱动在就一直在监听。"
+                    "IDM 启动后才会真正接管浏览器下载"
+                ),
+                action="点击「启动 IDM」",
+            )
         return Check(
             "channel", "浏览器通道", STATUS_OK,
             fact=f"127.0.0.1:{C.BROWSER_PORT} 正在监听",
