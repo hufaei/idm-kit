@@ -1,8 +1,12 @@
 """图形界面。
 
-设计取舍：界面本身以普通权限启动，这样打开就能读状态；只有写 Program Files
-的那一步才提权。若界面一开始就提权，用户会看到一切正常却依然无法排查权限
-相关问题，而且"以管理员身份运行"正是浏览器扩展失效的头号原因。
+界面以什么权限启动由用户决定，标题栏会写明当前是「管理员」还是「普通权限」。
+推荐以管理员身份运行：普通权限下进程表可能是残缺的，实测同一台机器上打包版
+只扫到 23 个进程，而源码运行能看到 360 个 —— 关闭 IDM 这类操作会莫名失败。
+
+提权带来一个副作用：子进程会继承令牌。所以「启动 IDM」不能直接 Popen，
+必须走 `runtime.launch_idm()` 让 IDM 回到普通权限，否则浏览器（Medium）会被
+UIPI 挡在 1001 通道之外，扩展反而报 Cannot launch IDM。
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -72,6 +77,8 @@ class App(tk.Tk):
         self.diag: diagnose.Diagnosis | None = None
         self.exe: Path | None = runtime.idm_exe()
         self._watch_job: str | None = None
+        self._start_deadline = 0.0
+        self._stop_deadline = 0.0
 
         self._build()
         self.refresh()
@@ -322,8 +329,8 @@ class App(tk.Tk):
         self.btn_restore.configure(state="normal" if has_backup else "disabled")
         self.btn_export.configure(state="normal")
 
-        # 端口优先判断，见 runtime.idm_running()：只看进程列表会在权限不足
-        # 时误报「没运行」，而这台机器上实测普通权限下只扫得到 23 个进程。
+        # 判据以进程枚举为主，端口不能当作 IDM 在运行的证据 —— 1001 由
+        # IDMWFP 驱动常驻占用，驱动在就一直在监听。详见 runtime.idm_running()。
         running = runtime.idm_running()[0]
         self.btn_start.configure(state="disabled" if running is True else "normal")
         self.btn_stop.configure(state="normal" if running is True else "disabled")
@@ -333,8 +340,8 @@ class App(tk.Tk):
     def _elevated_run(self, args: list[str]) -> tuple[bool, str]:
         """以管理员身份重新启动本程序执行某个动作。
 
-        界面自身不提权，只有真正需要写 Program Files 的动作才提权。这样
-        打开工具时不会因为自身权限过高而误判 IDM 的权限状态。
+        只有普通权限下做不到的事才走这里：写 Program Files、结束权限更高的
+        IDM 进程。界面自身是否提权由用户决定，标题栏会显示当前权限。
         """
         import ctypes
 
@@ -441,31 +448,128 @@ class App(tk.Tk):
                 pass
 
     def do_start(self) -> None:
+        """让 IDM 跑起来，而且必须是普通权限。
+
+        这是「扩展报 Cannot launch IDM」的正面解法：工具提权是为了读完整
+        进程表，可它拉起的 IDM 绝不能继承管理员令牌 —— 浏览器以 Medium
+        运行，UIPI 不允许它连接更高完整性的进程，1001 通道会被重置。
+        真正干活的是 runtime.launch_idm()。
+        """
         exe = self.exe
         if exe is None:
             return
 
-        # 关键：必须以普通权限启动 IDM，否则浏览器连不上它。
-        #
-        # 而本工具推荐以管理员身份运行，子进程默认继承管理员令牌 —— 直接
-        # Popen 会把 IDM 拉成 High 完整性级别，浏览器（Medium）就再也无法
-        # 通过 1001 通道连上它，扩展会报 Cannot launch IDM。
-        #
-        # 降权的办法是让 explorer.exe 代跑：它以登录用户身份常驻，
-        # 由它启动的进程自然回到普通权限。
-        try:
-            if runtime.is_elevated():
-                subprocess.Popen(
-                    ["explorer.exe", str(exe)],
-                    cwd=str(exe.parent),
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
+        idm = runtime.idm_process()
+        if idm is not None:
+            # 已经在跑：权限不对就重开，而不是再拉一个新的
+            if runtime.is_elevated_level(idm.integrity):
+                self._restart_idm_as_user(idm)
             else:
-                subprocess.Popen([str(exe)], cwd=str(exe.parent))
-        except Exception as exc:
-            messagebox.showerror("启动失败", str(exc))
+                messagebox.showinfo(
+                    "已经在运行",
+                    f"IDM 正以{idm.integrity_label}权限运行（pid {idm.pid}），"
+                    "浏览器可以连接它。",
+                )
             return
-        self.after(2500, self.refresh)
+
+        running, why = runtime.idm_running()
+        if running is None:
+            messagebox.showwarning(
+                "无法确认",
+                f"{why}\n\n以管理员身份运行本工具才能读到完整进程表。",
+            )
+            return
+
+        result = runtime.launch_idm(exe)
+        if not result.ok:
+            messagebox.showerror("启动失败", result.detail)
+            return
+
+        # 不假设降权一定成功 —— shell 会不会照做不属于我们的契约，
+        # 只有回读到的完整性级别才算证据。见 _await_start。
+        self._start_deadline = time.monotonic() + 12
+        self._await_start()
+
+    def _await_start(self) -> None:
+        """启动后回读校验。
+
+        用 after 轮询而不是 sleep：在界面线程里阻塞十几秒，窗口会假死。
+        判据是读回来的权限级别，不是「Popen 没抛异常」。
+        """
+        if not self.winfo_exists():
+            return
+
+        idm = runtime.idm_process()
+
+        if idm is None:
+            if time.monotonic() >= self._start_deadline:
+                messagebox.showwarning(
+                    "没有等到 IDM",
+                    "12 秒内没有检测到 IDMan 进程。\n\n"
+                    "可以双击桌面上的 IDM 图标打开它 —— 那条路径一定以"
+                    "普通权限运行。",
+                )
+                self.refresh()
+                return
+            self.after(500, self._await_start)
+            return
+
+        self.refresh()
+        if runtime.is_elevated_level(idm.integrity):
+            messagebox.showwarning(
+                "IDM 仍然是管理员权限",
+                f"IDM（pid {idm.pid}）以{idm.integrity_label}权限运行，"
+                "浏览器依然连不上它。\n\n"
+                "请双击桌面上的 IDM 图标启动 —— 那条路径不走本工具，"
+                "一定是普通权限。",
+            )
+        elif idm.readable:
+            messagebox.showinfo(
+                "已启动",
+                f"IDM（pid {idm.pid}）以{idm.integrity_label}权限运行，"
+                "浏览器可以连接它。",
+            )
+        else:
+            messagebox.showinfo(
+                "已启动",
+                f"IDM（pid {idm.pid}）已启动，但读不到它的权限级别。\n\n"
+                "点「刷新」重新检查。",
+            )
+
+    def _restart_idm_as_user(self, idm: runtime.ProcInfo) -> None:
+        """当前 IDM 权限过高：关掉它，再以普通权限拉起来。"""
+        if not messagebox.askokcancel(
+            "需要重新启动 IDM",
+            f"IDM 正以{idm.integrity_label}权限运行，浏览器（普通权限）连不上它 —— "
+            "这正是扩展报 Cannot launch IDM 的原因。\n\n"
+            "关闭它并以普通权限重新启动吗？关闭时需要一次管理员授权。",
+        ):
+            return
+
+        ok, err = self._elevated_run(["--stop", "--quiet"])
+        if not ok:
+            messagebox.showerror("失败", err)
+            return
+
+        self._stop_deadline = time.monotonic() + 15
+        self._await_stopped()
+
+    def _await_stopped(self) -> None:
+        """等提权子进程把 IDM 关掉，然后走正常启动流程。"""
+        if not self.winfo_exists():
+            return
+
+        if runtime.idm_process() is None:
+            self.do_start()
+            return
+
+        if time.monotonic() >= self._stop_deadline:
+            messagebox.showwarning(
+                "没有关掉",
+                "IDM 仍在运行。请手动关闭它，再点「启动 IDM」。",
+            )
+            return
+        self.after(600, self._await_stopped)
 
     def do_stop(self) -> None:
         if not messagebox.askokcancel("关闭 IDM", "将结束所有 IDM 相关进程。"):
@@ -521,7 +625,7 @@ class App(tk.Tk):
                 "用管理员权限再试一次吗？会弹出授权提示。",
             ):
                 return
-            ok, err = self._elevated_run(["--stop"])
+            ok, err = self._elevated_run(["--stop", "--quiet"])
             if not ok:
                 messagebox.showerror("失败", err)
                 return

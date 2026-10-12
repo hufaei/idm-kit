@@ -9,6 +9,8 @@ from __future__ import annotations
 import ctypes
 import os
 import socket
+import subprocess
+import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime
@@ -249,6 +251,65 @@ def is_elevated() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+#: 会让浏览器连不上的完整性级别。浏览器以 Medium 运行，而 UIPI 不允许低
+#: 完整性进程连接更高完整性的进程，1001 通道会被直接重置。
+ELEVATED_LEVELS = ("high", "system")
+
+
+def is_elevated_level(integrity: str) -> bool:
+    """这个完整性级别是否高于浏览器，从而连不上。"""
+    return integrity in ELEVATED_LEVELS
+
+
+def idm_process() -> ProcInfo | None:
+    """当前运行的 IDMan 进程。没有返回 None。"""
+    procs = running_processes(("IDMan",))
+    return procs[0] if procs else None
+
+
+# ---- 启动 IDM：必须保持普通权限 ----------------------------------------
+
+
+@dataclass
+class LaunchResult:
+    ok: bool
+    method: str            # direct / explorer / none
+    detail: str = ""
+
+
+def launch_idm(exe: Path) -> LaunchResult:
+    """以普通权限启动 IDM。
+
+    本工具推荐以管理员身份运行 —— 普通权限下进程表可能是残缺的，实测同一台
+    机器上打包版只扫到 23 个进程，而源码运行能看到 360 个。但子进程默认继承
+    调用者的令牌：提权的工具直接 Popen，会把 IDM 一起拉成 High 完整性级别。
+    浏览器以 Medium 运行，UIPI 不允许它连接更高完整性的进程，1001 通道被
+    重置，扩展就报 Cannot launch IDM —— 工具提权本是为了读进程表，却顺手
+    制造了另一个故障。
+
+    降权靠 explorer.exe 代跑：它以登录用户身份常驻，由它启动的进程自然回到
+    普通权限。自身未被提权时不需要这一层，直接启动即可。
+
+    这里不假设降权一定成功 —— shell 的转发行为不属于我们的契约。启动是否
+    真的落到普通权限，由调用方回读 `idm_process()` 的完整性级别来确认。
+    """
+    if not exe.is_file():
+        return LaunchResult(False, "none", f"文件不存在：{exe}")
+
+    try:
+        if is_elevated():
+            subprocess.Popen(
+                ["explorer.exe", str(exe)],
+                cwd=str(exe.parent),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return LaunchResult(True, "explorer", "已交给 explorer 以普通权限启动")
+        subprocess.Popen([str(exe)], cwd=str(exe.parent))
+        return LaunchResult(True, "direct", "已直接启动（本工具未被提权）")
+    except Exception as exc:
+        return LaunchResult(False, "none", str(exc))
 
 
 # ---- 安装路径 ----------------------------------------------------------
@@ -501,7 +562,6 @@ def wfp_service_state() -> str:
     捕不住）。这里自己按多种编码试解，最后兜底。
     """
     try:
-        import subprocess
         proc = subprocess.run(
             ["sc", "query", C.WFP_SERVICE],
             capture_output=True, timeout=5,

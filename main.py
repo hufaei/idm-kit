@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -43,7 +44,6 @@ def _stop_idm() -> list[str]:
     下可能一个都拿不到，那时循环体一次都不执行，表现为「停不掉也没报错」。
     返回码 128 是「没有找到该进程」，不算失败；5 才是拒绝访问。
     """
-    import subprocess
     denied: list[str] = []
     for name in C.IDM_PROCESSES:
         try:
@@ -64,6 +64,14 @@ def _stop_idm() -> list[str]:
 
 
 def cmd_check() -> int:
+    """在终端输出诊断报告。
+
+    实测：打包成 GUI 程序后这个子命令不产生输出 —— 此时 `sys.stdout` 并不是
+    None，而是一个指向无效句柄的对象，print 写进去看不到，但进程仍以正确的
+    退出码结束。无法用 isatty() 区分这种情况和 `--check > report.txt` 这类
+    重定向（两者都不是终端），所以这里保持"总是 print"：重定向照常工作，
+    GUI 版静默。界面里用不到这个子命令。
+    """
     d = diagnose.diagnose()
     text = diagnose.render_text(d)
     if sys.stdout is not None:
@@ -142,11 +150,13 @@ def cmd_restore(quiet: bool) -> int:
     return 0
 
 
-def cmd_stop() -> int:
+def cmd_stop(quiet: bool = False) -> int:
     """结束所有 IDM 进程。
 
     提权后调用。普通权限下进程表可能是残缺的，taskkill 会回报「没找到」，
     但那是看不到而不是真没有；管理员权限才读得到完整进程表。
+
+    任何异常都记进 denied，不允许被静默吞掉 —— 这个动作的失败必须说出来。
     """
     killed: list[str] = []
     denied: list[str] = []
@@ -159,19 +169,22 @@ def cmd_stop() -> int:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception:
+            denied.append(name)
             continue
         if result.returncode == 0:
             killed.append(name)
         elif result.returncode == 5:
             denied.append(name)
 
-    if killed:
-        _message("已关闭：\n\n" + "、".join(killed))
-        return 0
     if denied:
         _message("以下进程拒绝访问：\n\n" + "、".join(denied), error=True)
         return 4
-    _message("没有找到正在运行的 IDM 进程。")
+    if killed:
+        if not quiet:
+            _message("已关闭：\n\n" + "、".join(killed))
+        return 0
+    if not quiet:
+        _message("没有找到正在运行的 IDM 进程。")
     return 0
 
 
@@ -226,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return cmd_check()
     if args.stop:
-        return cmd_stop()
+        return cmd_stop(args.quiet)
     return cmd_gui()
 
 

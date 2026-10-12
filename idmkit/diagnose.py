@@ -277,13 +277,13 @@ def _check_update() -> Check:
 
 
 def _check_process(
-    procs: list[runtime.ProcInfo], total: int = 0
+    procs: list[runtime.ProcInfo],
 ) -> tuple[Check, runtime.ProcInfo | None]:
     idm = next((p for p in procs if p.name == "IDMan"), None)
 
-    # 判据来自 runtime.idm_running()：端口优先，进程枚举只作补充。
-    # 只看进程列表会在权限不足时误报「没运行」——实测普通权限下这份 exe
-    # 只能扫到 23 个进程，而同一台机器上源码运行能看到 360 个。
+    # 判据以进程枚举为主，见 runtime.idm_running()：端口不能证明 IDM 在运行，
+    # 1001 是 IDMWFP 驱动常驻占用的。而枚举受权限影响 —— 实测普通权限下打包版
+    # 只扫到 23 个进程，所以「枚举不到」只推出「无法确认」，不推出「没运行」。
     running, why = runtime.idm_running()
 
     if running is True:
@@ -291,7 +291,8 @@ def _check_process(
             fact = f"正在运行，pid {idm.pid}，权限 {idm.integrity_label}"
             meaning = "进程正常"
         else:
-            # 端口证明它活着，但进程表里看不到它 —— 不必让用户为此操心
+            # 防御性分支：idm_running() 现在只在枚举到 IDMan 时返回 True，
+            # 正常走不到这里，留作判据再改时的兜底。
             fact = f"正在运行（{why}）"
             meaning = "进程正常"
         others = [p.name for p in procs if p.name != "IDMan"]
@@ -303,7 +304,10 @@ def _check_process(
         return Check(
             "process", "IDM 进程", STATUS_WARN,
             fact=f"无法确认是否在运行（{why}）",
-            meaning="进程表读不完整，通常是权限不足；端口也没在监听",
+            meaning=(
+                "进程表读不完整，通常是权限不足。这种时候在表里找不到 IDMan，"
+                "不能当作「没在运行」"
+            ),
             action="以管理员身份运行本工具，判断会更准确",
         ), None
 
@@ -511,7 +515,7 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
 
     procs = runtime.running_processes()
     total = runtime.total_process_count()
-    proc_check, idm_proc = _check_process(procs, total)
+    proc_check, idm_proc = _check_process(procs)
     checks.append(proc_check)
     checks.append(_check_integrity(idm_proc))
     checks.append(_check_channel(idm_proc))
