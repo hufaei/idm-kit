@@ -94,15 +94,23 @@ if ($haHits.Count -eq 0) {
     $stateA = "AMBIGUOUS ($($haHits.Count)x)"
 } else {
     $offA = $haHits[0]
-    $mid = HexOf -B $bytes -Start ($offA + 9) -Len 6
-    $raw = $bytes[($offA + 9)..($offA + 14)]
-    if ($mid -eq $midOldA) {
-        $stateA = 'NOT applied'
-    } elseif ($raw[0] -eq 0xB8 -and $raw[5] -eq 0x90) {
-        $stateA = 'APPLIED'
-        $daysA = [BitConverter]::ToUInt32($raw, 1)
+    # A real site A is a 20-byte block: the 9-byte prefix plus 6 bytes of code
+    # plus the trailing instruction. The detail report below reads all 20, so
+    # the guard must cover 20 as well -- checking only 15 would leave HexOf
+    # slicing past EOF for a match near the end of the file.
+    if ($offA + 20 -gt $bytes.Length) {
+        $stateA = 'TRUNCATED'
     } else {
-        $stateA = 'UNRECOGNISED'
+        $raw = $bytes[($offA + 9)..($offA + 14)]
+        $mid = ($raw | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+        if ($mid -eq $midOldA) {
+            $stateA = 'NOT applied'
+        } elseif ($raw[0] -eq 0xB8 -and $raw[5] -eq 0x90) {
+            $stateA = 'APPLIED'
+            $daysA = [BitConverter]::ToUInt32($raw, 1)
+        } else {
+            $stateA = 'UNRECOGNISED'
+        }
     }
 }
 
@@ -117,11 +125,12 @@ if ($hbHits.Count -ne 1) {
 } else {
     $offB = $hbHits[0] + $bDelta
     $daysB = [BitConverter]::ToUInt32($bytes, $offB)
-    # 30 is the shipped .data default, so it means "untouched". Any other value
-    # is only trustworthy when it agrees with what site A actually encodes --
-    # comparing against a fixed literal would misreport every other -Days value.
-    if ($daysB -eq 30) { $stateB = 'NOT applied' }
-    elseif ($null -ne $daysA -and $daysB -eq $daysA) { $stateB = 'APPLIED' }
+    # Agreement with site A is checked FIRST. The shipped .data default is 30,
+    # so -Days 30 rewrites the code but leaves this dword untouched; testing for
+    # 30 before testing for agreement would report that file as "not applied"
+    # and push the overall state to UNKNOWN even though the code was patched.
+    if ($null -ne $daysA -and $daysB -eq $daysA) { $stateB = 'APPLIED' }
+    elseif ($daysB -eq 30) { $stateB = 'NOT applied' }
     else { $stateB = "OTHER ($daysB)" }
 }
 
@@ -166,6 +175,13 @@ if ($stateB -eq 'APPLIED') {
     Write-Host 'patchB  : NOT applied (.data default = 30)' -ForegroundColor Yellow
 } else {
     Write-Host "patchB  : $stateB" -ForegroundColor Red
+}
+
+# 30 days is what the unpatched build already grants, so patching to 30 changes
+# the code without changing the effective limit. Worth saying out loud.
+if ($stateA -eq 'APPLIED' -and $daysA -eq 30) {
+    Write-Host ''
+    Write-Host 'note    : 30 is the shipped default, so this patch has no effect' -ForegroundColor Yellow
 }
 
 # ---------------- backup ----------------

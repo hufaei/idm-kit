@@ -117,7 +117,7 @@ while ($true) {
     if ($i -lt 0) { break }
     $probeHits.Add($i); $q = $i + 1
 }
-if ($probeHits.Count -eq 1) {
+if ($probeHits.Count -eq 1 -and $probeHits[0] + 15 -le $bytes.Length) {
     $mp = $probeHits[0] + 9
     $curMid = $bytes[$mp..($mp + 5)]
     if ($curMid[0] -eq 0xB8 -and $curMid[5] -eq 0x90) {
@@ -151,7 +151,7 @@ Write-Host ("A      : anchor at 0x{0:X}, target 0x{1:X} (va 0x{2:X})" -f ($hits[
 $curA = $bytes[$offA..($offA + 5)]
 $alreadyA = ($curA -join ',') -eq ($newA -join ',')
 if ($alreadyA) {
-    Write-Host "A      : already patched, skip"
+    Write-Host "A      : target already equals the requested value, no write needed"
 } else {
     for ($k = 0; $k -lt $oldA.Length; $k++) {
         if ($bytes[$offA + $k] -ne $oldA[$k]) { throw ("A: original byte mismatch at 0x{0:X}. Aborted." -f ($offA + $k)) }
@@ -173,7 +173,7 @@ Write-Host ("B      : anchor at 0x{0:X}, target 0x{1:X}" -f ($hitsB[0]), $offB)
 $curB = $bytes[$offB..($offB + 3)]
 $alreadyB = ($curB -join ',') -eq ($newB -join ',')
 if ($alreadyB) {
-    Write-Host "B      : already patched, skip"
+    Write-Host "B      : target already equals the requested value, no write needed"
 } else {
     for ($k = 0; $k -lt $oldB.Length; $k++) {
         if ($bytes[$offB + $k] -ne $oldB[$k]) { throw ("B: original byte mismatch at 0x{0:X}. Aborted." -f ($offB + $k)) }
