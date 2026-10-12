@@ -451,23 +451,44 @@ class App(tk.Tk):
     def do_stop(self) -> None:
         if not messagebox.askokcancel("关闭 IDM", "将结束所有 IDM 相关进程。"):
             return
-        procs = runtime.running_processes()
-        failed = []
-        for p in procs:
+
+        # 按映像名结束，而不是先枚举拿 PID。枚举结果受权限影响 —— 普通权限下
+        # 可能一个都拿不到，那时循环体一次都不执行，用户看到的就是「点了没反应」。
+        # 交给 taskkill 自己去找，它不需要我们先枚举。
+        names = [n + ".exe" for n in C.IDM_PROCESSES]
+        kicked: list[str] = []
+        blocked: list[str] = []
+
+        for name in names:
             try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(p.pid), "/F"],
-                    capture_output=True, timeout=5,
+                result = subprocess.run(
+                    ["taskkill", "/IM", name, "/F"],
+                    capture_output=True, timeout=8,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except Exception:
-                failed.append(p.name)
-        if failed:
+                blocked.append(name)
+                continue
+            # 返回码 128 是「没有找到该进程」，不算失败；
+            # 返回码 5 是「拒绝访问」，那个才是真的没权限。
+            if result.returncode == 0:
+                kicked.append(name)
+            elif result.returncode == 5:
+                blocked.append(name)
+
+        # 杀完再问一次端口：进程没了但通道还在，说明有别的东西占着
+        self.after(900, self.refresh)
+
+        if blocked:
             messagebox.showwarning(
                 "部分未关闭",
-                "以下进程需要管理员权限才能结束：\n" + "、".join(failed),
+                "以下进程拒绝访问，需要管理员权限：\n" + "、".join(blocked),
             )
-        self.after(800, self.refresh)
+        elif not kicked:
+            messagebox.showinfo(
+                "没有需要关闭的",
+                "没有找到正在运行的 IDM 进程，它可能已经关掉了。",
+            )
 
 
 def run() -> int:
