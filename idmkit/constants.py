@@ -87,9 +87,6 @@ REG_FLAG_RVA = 0x37BD24              # 注册状态标志
 # 更新的时刻。据此可以预测下一次自动更新，提前提醒用户。
 
 REG_KEY_MAIN = r"Software\DownloadManager"
-REG_KEY_BACKUP = (
-    r"Software\Classes\CLSID\{84797876-C678-1780-A556-0CD06786780F}"
-)
 
 REG_VALUE_LAST_CHECK_QU = "LastCheckQU"   # 上次检查更新的 Unix 时间戳
 REG_VALUE_LAST_CHECK = "LstCheck"         # 上次检查更新的可读日期
