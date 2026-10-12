@@ -385,6 +385,7 @@ def _check_driver() -> Check:
 
 def _check_extensions(exts: list[runtime.BrowserExt]) -> Check:
     installed = [e for e in exts if e.installed]
+    leftover = [e for e in exts if e.leftover]
     present = [e for e in exts if e.detail != "未安装该浏览器"]
     if not present:
         return Check(
@@ -393,6 +394,14 @@ def _check_extensions(exts: list[runtime.BrowserExt]) -> Check:
             meaning="装浏览器后才需要这一步",
         )
     if not installed:
+        if leftover:
+            return Check(
+                "ext", "浏览器扩展", STATUS_WARN,
+                fact="只剩残留："
+                + "、".join(f"{e.browser}（{e.detail}）" for e in leftover),
+                meaning="这是浏览器缓存的旧文件，扩展已经不可能工作",
+                action="装上 IDM 后扩展会自动重新注册；Firefox 需手动拖一次 xpi",
+            )
         return Check(
             "ext", "浏览器扩展", STATUS_WARN,
             fact="已装浏览器："
@@ -402,6 +411,8 @@ def _check_extensions(exts: list[runtime.BrowserExt]) -> Check:
             action="Chrome/Edge 重装 IDM 会自动装上；Firefox 需手动安装",
         )
     lines = [f"{e.browser}（{e.detail}）" for e in installed]
+    if leftover:
+        lines.append("残留：" + "、".join(e.browser for e in leftover))
     return Check(
         "ext", "浏览器扩展", STATUS_OK,
         fact="已安装：" + "、".join(lines),

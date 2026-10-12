@@ -392,24 +392,42 @@ def port_state(port: int = C.BROWSER_PORT) -> str:
 
 
 def wfp_service_state() -> str:
-    """IDMWFP 驱动服务的状态。"""
+    """IDMWFP 驱动服务的状态。
+
+    sc.exe 的输出编码跟随系统区域设置 —— 中文系统返回 GBK 字节。不能依赖
+    subprocess 的文本模式，它的编码可能被 PYTHONIOENCODING 之类影响，服务不
+    存在时输出中文就会在读取线程里抛 UnicodeDecodeError（该异常不在主线程，
+    捕不住）。这里自己按多种编码试解，最后兜底。
+    """
     try:
         import subprocess
         proc = subprocess.run(
             ["sc", "query", C.WFP_SERVICE],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        out = proc.stdout
-        if "RUNNING" in out:
-            return "running"
-        if "STOPPED" in out:
-            return "stopped"
-        if proc.returncode != 0:
-            return "missing"
-        return "unknown"
     except Exception:
         return "unknown"
+
+    raw = proc.stdout or b""
+    out = None
+    for enc in ("utf-8", "mbcs", "latin-1"):
+        try:
+            out = raw.decode(enc)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if out is None:
+        out = raw.decode("latin-1", errors="replace")
+
+    upper = out.upper()
+    if "RUNNING" in upper:
+        return "running"
+    if "STOPPED" in upper:
+        return "stopped"
+    if proc.returncode != 0:
+        return "missing"
+    return "unknown"
 
 
 # ---- 浏览器扩展 --------------------------------------------------------
@@ -420,24 +438,64 @@ class BrowserExt:
     browser: str
     installed: bool
     detail: str = ""
+    leftover: bool = False   # 只剩浏览器缓存的文件，扩展已不可能工作
 
 
-def _chromium_ext(browser: str, profile_tmpl: str, ext_id: str) -> BrowserExt:
+def _chromium_registered(subkeys: tuple[str, ...]) -> bool:
+    """扩展是否真正注册，且注册表指向的 crx 文件确实存在。
+
+    只看浏览器 profile 里的扩展目录会误判：IDM 卸载后 Chrome 缓存的扩展副本
+    还在，但源文件已经没了，扩展不可能工作。
+    """
+    if winreg is None:
+        return False
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for subkey in subkeys:
+            try:
+                with winreg.OpenKey(hive, subkey) as key:
+                    crx, _ = winreg.QueryValueEx(key, "path")
+            except OSError:
+                continue
+            if isinstance(crx, str) and crx and Path(crx).is_file():
+                return True
+    return False
+
+
+def _chromium_ext(
+    browser: str,
+    profile_tmpl: str,
+    ext_id: str,
+    reg_subkeys: tuple[str, ...],
+) -> BrowserExt:
     root = Path(profile_tmpl.format(localappdata=os.environ.get("LOCALAPPDATA", "")))
     if not root.is_dir():
         return BrowserExt(browser, False, "未安装该浏览器")
+
     ext_dir = root / "Default" / "Extensions" / ext_id
-    if not ext_dir.is_dir():
-        return BrowserExt(browser, False, "扩展未安装")
-    versions = [d.name for d in ext_dir.iterdir() if d.is_dir()]
-    return BrowserExt(browser, True, "版本 " + ", ".join(versions))
+    versions = (
+        [d.name for d in ext_dir.iterdir() if d.is_dir()] if ext_dir.is_dir() else []
+    )
+    label = "、".join(versions) if versions else ""
+
+    if _chromium_registered(reg_subkeys):
+        return BrowserExt(browser, True, f"版本 {label}" if label else "已注册")
+
+    if versions:
+        return BrowserExt(
+            browser, False,
+            f"只剩扩展文件（{label}），未注册",
+            leftover=True,
+        )
+    return BrowserExt(browser, False, "扩展未安装")
 
 
 def browser_extensions() -> list[BrowserExt]:
     out: list[BrowserExt] = []
     for name, tmpl in C.BROWSER_PROFILE_DIRS.items():
-        ext_id = C.EXT_EDGE_ID if name == "Edge" else C.EXT_CHROME_ID
-        out.append(_chromium_ext(name, tmpl, ext_id))
+        if name == "Edge":
+            out.append(_chromium_ext(name, tmpl, C.EXT_EDGE_ID, C.REG_EXT_EDGE))
+        else:
+            out.append(_chromium_ext(name, tmpl, C.EXT_CHROME_ID, C.REG_EXT_CHROME))
     out.append(_firefox_ext())
     return out
 
@@ -448,18 +506,34 @@ def _firefox_ext() -> BrowserExt:
     )
     if not root.is_dir():
         return BrowserExt("Firefox", False, "未安装该浏览器")
+
+    leftover: str | None = None
     for profile in root.iterdir():
         if not profile.is_dir():
             continue
+        # 真正可用的判据：extensions 目录里存在 idmmzcc 的 xpi 文件。
+        # 只查 extensions.json 会误判 —— IDM 卸载后那份记录还在，文件却没了。
+        ext_dir = profile / "extensions"
+        if ext_dir.is_dir():
+            for f in ext_dir.iterdir():
+                if "idmmzcc" in f.name.lower():
+                    return BrowserExt("Firefox", True, f"配置文件 {profile.name}")
+
         ext_json = profile / "extensions.json"
-        if not ext_json.is_file():
-            continue
-        try:
-            text = ext_json.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if "idmmzcc" in text or "tonec" in text.lower():
-            return BrowserExt("Firefox", True, f"配置文件 {profile.name}")
+        if ext_json.is_file():
+            try:
+                text = ext_json.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if "idmmzcc" in text or "tonec" in text.lower():
+                leftover = leftover or profile.name
+
+    if leftover:
+        return BrowserExt(
+            "Firefox", False,
+            f"只剩记录（{leftover}），扩展文件已不在",
+            leftover=True,
+        )
     return BrowserExt("Firefox", False, "扩展未安装")
 
 
