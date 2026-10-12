@@ -80,13 +80,6 @@ MIN_USEFUL_DAYS = 31                 # <= 30 等于没打
 TRIAL_LIMIT_RVA = 0x37BD28           # 试用上限
 REG_FLAG_RVA = 0x37BD24              # 注册状态标志
 
-# ---- 安装路径 ----------------------------------------------------------
-
-IDM_DIR_CANDIDATES = (
-    r"C:\Program Files (x86)\Internet Download Manager",
-    r"C:\Program Files\Internet Download Manager",
-)
-
 # ---- 注册表 ------------------------------------------------------------
 #
 # 实测：并不存在名为 Therad 的"已用天数"值。IDM 6.43 把可用的时间信息记在
@@ -104,6 +97,22 @@ REG_VALUE_VERSION_TAG = "idmvers"         # 例："v6.43b15 Trial"
 REG_VALUE_CURRENT_BUILD = "vCOUFP"        # 例："643b15"
 REG_VALUE_LAUNCH_ON_START = "LaunchOnStart"
 REG_VALUE_ENABLE_DRIVER = "EnableDriver"
+REG_VALUE_EXE_PATH = "ExePath"          # IDM 自己写：实际运行的 exe 完整路径
+
+#: 卸载信息所在的键。实测 InstallLocation 是空值，只有 UninstallString 可用；
+#: 去掉文件名即安装目录。IDM 允许装到非系统盘（安装器是 NSIS，支持 /D=），
+#: 所以不能把安装路径写死。
+REG_UNINSTALL_KEYS = (
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Internet Download Manager",
+    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Internet Download Manager",
+)
+REG_VALUE_UNINSTALL_STRING = "UninstallString"
+
+#: 最后的后备：注册表都读不到时的猜测。放在最后是因为 IDM 可以装在别处。
+IDM_DIR_CANDIDATES = (
+    r"C:\Program Files (x86)\Internet Download Manager",
+    r"C:\Program Files\Internet Download Manager",
+)
 
 #: 二进制中的原文：IDM checks for a new release every 2 weeks
 UPDATE_CHECK_INTERVAL_DAYS = 14

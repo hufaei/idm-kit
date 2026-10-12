@@ -44,6 +44,19 @@ _STATUS_SYMBOL = {
 }
 
 
+def _is_writable(path: Path) -> bool:
+    """实际试着打开来写，而不是读 ACL。
+
+    ACL 的继承规则、只读属性、文件占用都会影响结果，判断"能不能改"最可靠的
+    办法就是真去试一次。这里只打开不写入，代价可以忽略。
+    """
+    try:
+        with open(path, "r+b"):
+            return True
+    except OSError:
+        return False
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -335,12 +348,48 @@ class App(tk.Tk):
         self._run_inline_action("restore")
 
     def _run_inline_action(self, action: str) -> None:
-        """在提权子进程里执行，然后刷新界面。"""
+        """尽量不提权。
+
+        装到 Program Files 时文件归 Administrators 所有，必须提权；但如果 IDM
+        装在用户可写的位置（例如非系统盘），直接改就行，不必让用户过一遍 UAC。
+        """
+        exe = self.exe
+        if exe is None:
+            return
+
+        writable = _is_writable(exe)
+        if writable and action == "patch":
+            try:
+                result = patch.apply_patch(exe, C.DEFAULT_DAYS)
+            except Exception as exc:
+                messagebox.showerror("失败", str(exc))
+                return
+            if result.changed:
+                messagebox.showinfo(
+                    "完成",
+                    f"处理完成，无需管理员权限。\n\n"
+                    f"试用上限：{result.days} 天\n文件：{exe}",
+                )
+            else:
+                messagebox.showinfo("无需处理", "当前状态不需要改动。")
+            self.refresh()
+            return
+
+        if writable and action == "restore":
+            try:
+                result = patch.restore(exe)
+            except Exception as exc:
+                messagebox.showerror("失败", str(exc))
+                return
+            messagebox.showinfo("完成", f"已还原为官方原版，无需管理员权限。\n\n{exe}")
+            self.refresh()
+            return
+
+        # 文件不可写，只能提权
         ok, err = self._elevated_run([f"--{action}", "--quiet"])
         if not ok:
             messagebox.showerror("失败", err)
             return
-        # 子进程独立运行，稍等让它落盘再刷新
         self.after(1200, self.refresh)
 
     def do_export(self) -> None:

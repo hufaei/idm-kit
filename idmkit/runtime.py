@@ -185,7 +185,48 @@ def is_elevated() -> bool:
 # ---- 安装路径 ----------------------------------------------------------
 
 
+def _read_hklm(path: str, value: str):
+    if winreg is None:
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+            data, _ = winreg.QueryValueEx(key, value)
+            return data
+    except OSError:
+        return None
+
+
+def _dir_from_registry() -> Path | None:
+    """从注册表推导安装目录。
+
+    IDM 允许装到非系统盘（安装器是 NSIS，支持 ``/D=``），所以不能把路径写死。
+    两个来源，按可靠性排序：
+
+    1. ``HKCU\\Software\\DownloadManager\\ExePath`` —— IDM 自己写的，指向它
+       实际运行的 exe，最准。
+    2. 卸载信息里的 ``UninstallString`` —— 安装程序写的，去掉文件名即目录。
+       同一处的 ``InstallLocation`` 实测是空值，不可依赖。
+    """
+    exe = _read_hkcu(C.REG_KEY_MAIN, C.REG_VALUE_EXE_PATH)
+    if isinstance(exe, str) and exe.strip():
+        p = Path(exe.strip().strip('"'))
+        if p.is_file():
+            return p.parent
+
+    for key in C.REG_UNINSTALL_KEYS:
+        raw = _read_hklm(key, C.REG_VALUE_UNINSTALL_STRING)
+        if isinstance(raw, str) and raw.strip():
+            p = Path(raw.strip().strip('"'))
+            if p.parent.is_dir() and (p.parent / C.EXE_FILENAME).is_file():
+                return p.parent
+    return None
+
+
 def find_idm_dir() -> Path | None:
+    """定位 IDM 安装目录。注册表优先，硬编码候选只作最后后备。"""
+    found = _dir_from_registry()
+    if found is not None:
+        return found
     for candidate in C.IDM_DIR_CANDIDATES:
         p = Path(candidate)
         if (p / C.EXE_FILENAME).is_file():

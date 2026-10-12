@@ -52,8 +52,8 @@ python main.py --restore
 python main.py --export
 ```
 
-界面本身以**普通权限**启动，因此打开就能读状态。只有点「激活」时才会临时提权，
-因为那一步要写 Program Files。
+界面本身以**普通权限**启动，因此打开就能读状态。**只有确实需要写 Program Files
+时才提权**：工具先试着打开目标文件，能写就直接改，不能写才弹一次 UAC。
 
 运行时不需要任何第三方库，只用 Python 标准库。
 
@@ -73,6 +73,29 @@ idmkit/
 分层原则：`pe.py` 只认字节，`patch.py` 只认状态，`runtime.py` 只认现象，
 `diagnose.py` 只负责把现象翻译成人能读的结论。界面不包含任何判断逻辑，
 它只渲染 `diagnose` 的输出。
+
+### 安装路径不写死
+
+`Program Files` 归 `BUILTIN\Administrators` 所有，`BUILTIN\Users` 只有
+`ReadAndExecute`，所以改那里的 `IDMan.exe` 必须提权。但这不是唯一的部署方式：
+IDM 的安装器是 NSIS，支持 `/D=`，用户可以装到非系统盘。
+
+因此定位安装目录时**注册表优先，硬编码路径只作最后后备**：
+
+| 顺序 | 来源 | 说明 |
+|---|---|---|
+| 1 | `HKCU\Software\DownloadManager\ExePath` | IDM 自己写的，指向它实际运行的 exe |
+| 2 | 卸载信息的 `UninstallString` | 安装程序写的，去掉文件名即目录 |
+| 3 | 硬编码的 `Program Files` 两个候选 | 注册表都读不到时的猜测 |
+
+卸载信息里的 `InstallLocation` **实测是空值**，不可依赖。
+
+实测验证过：把 `ExePath` 临时指向用户目录后，`find_idm_dir()` 跟着走；
+把它指向不存在的路径或删除后，回退到 `UninstallString`，仍能正确定位。
+
+配套的行为是**能不提权就不提权**：`ui._is_writable()` 直接试着以 `r+b` 打开
+目标文件——ACL 继承、只读属性、占用状态都会影响结果，实际试一次比读 ACL 可靠。
+能写就当场改完，不能写才走提权分支。
 
 
 ## 补丁原理
