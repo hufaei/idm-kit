@@ -27,6 +27,26 @@ except ImportError:  # 非 Windows 平台，便于语法检查
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _a32 = ctypes.WinDLL("advapi32", use_last_error=True)
 
+# 原型必须显式声明。HANDLE 在 64 位下是指针，而 ctypes 的默认返回类型是
+# 32 位有符号整数 —— 句柄值一旦超过 2^31 就被截断成负数，恰好等于
+# INVALID_HANDLE_VALUE(-1)。调用其实成功了，代码却当成失败处理。
+#
+# 这个 bug 只在句柄值恰好较大时出现，打包后的 exe 更容易踩到：同一份代码
+# 直接跑 Python 时句柄值小、一切正常，打成 exe 后加载的模块更多、句柄值变大，
+# 于是报「IDM 没在运行」。
+_k32.OpenProcess.restype = wintypes.HANDLE
+_k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_k32.CloseHandle.restype = wintypes.BOOL
+_k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+_a32.OpenProcessToken.restype = wintypes.BOOL
+_a32.OpenProcessToken.argtypes = (
+    wintypes.HANDLE,
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.HANDLE),
+)
+_a32.GetTokenInformation.restype = wintypes.BOOL
+
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 TOKEN_QUERY = 0x0008
 TokenIntegrityLevel = 25
@@ -57,6 +77,42 @@ class _SID_AND_ATTRIBUTES(ctypes.Structure):
 
 class _TOKEN_MANDATORY_LABEL(ctypes.Structure):
     _fields_ = [("Label", _SID_AND_ATTRIBUTES)]
+
+
+class _PROCESSENTRY32(ctypes.Structure):
+    """CreateToolhelp32Snapshot 的进程条目（ANSI 版）。
+
+    字段顺序必须与 winbase.h 的 PROCESSENTRY32 一致。th32DefaultHeapID 在
+    64 位下是 8 字节，与前面的 DWORD 之间留 4 字节填充 —— ctypes 的默认对齐
+    与 MSVC 相同，所以不必手写 padding。
+    """
+
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_char * 260),
+    ]
+
+
+TH32CS_SNAPPROCESS = 0x00000002
+
+#: 声明 restype 之后，失败返回的 -1 会以 0xFFFFFFFFFFFFFFFF 形式出现，
+#: 不能再拿 -1 去比。
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+_k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+_k32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+_k32.Process32First.restype = wintypes.BOOL
+_k32.Process32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32))
+_k32.Process32Next.restype = wintypes.BOOL
+_k32.Process32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32))
 
 
 def _integrity_rid(pid: int) -> int | None:
@@ -117,40 +173,27 @@ class ProcInfo:
 
 
 def _list_pids(name: str) -> list[int]:
-    """枚举同名进程的 pid，用 tasklist 之外的纯 API 方式。
+    """枚举同名进程的 pid，用纯 API 方式，不依赖 tasklist。
 
-    用 CreateToolhelp32Snapshot 遍历，避免依赖外部命令。
+    结构体和函数原型都在模块级声明，见那里的注释 —— 不声明 restype 会让
+    64 位句柄被截断成 32 位，打包成 exe 后尤其容易踩到。
     """
-    TH32CS_SNAPPROCESS = 0x00000002
-
-    class _PROCESSENTRY32(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD),
-            ("cntUsage", wintypes.DWORD),
-            ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
-            ("th32ModuleID", wintypes.DWORD),
-            ("cntThreads", wintypes.DWORD),
-            ("th32ParentProcessID", wintypes.DWORD),
-            ("pcPriClassBase", ctypes.c_long),
-            ("dwFlags", wintypes.DWORD),
-            ("szExeFile", ctypes.c_char * 260),
-        ]
-
     snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snap == -1 or not snap:
+    if not snap or snap == _INVALID_HANDLE:
         return []
+
     entry = _PROCESSENTRY32()
     entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
     pids: list[int] = []
     try:
-        if _k32.Process32First(snap, ctypes.byref(entry)):
-            while True:
-                exe = entry.szExeFile.decode("mbcs", errors="replace")
-                if exe.lower() == f"{name.lower()}.exe":
-                    pids.append(int(entry.th32ProcessID))
-                if not _k32.Process32Next(snap, ctypes.byref(entry)):
-                    break
+        if not _k32.Process32First(snap, ctypes.byref(entry)):
+            return []
+        while True:
+            exe = entry.szExeFile.decode("mbcs", errors="replace")
+            if exe.lower() == f"{name.lower()}.exe":
+                pids.append(int(entry.th32ProcessID))
+            if not _k32.Process32Next(snap, ctypes.byref(entry)):
+                break
     finally:
         _k32.CloseHandle(snap)
     return pids
