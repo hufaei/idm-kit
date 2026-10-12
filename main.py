@@ -37,19 +37,27 @@ def _message(text: str, title: str = APP_TITLE, error: bool = False) -> None:
 
 
 def _stop_idm() -> list[str]:
-    """结束所有 IDM 相关进程，返回未能结束的名字。"""
+    """结束所有 IDM 相关进程，返回未能结束的名字。
+
+    按映像名调用 taskkill，而不是先枚举拿 PID：枚举结果受权限影响，普通权限
+    下可能一个都拿不到，那时循环体一次都不执行，表现为「停不掉也没报错」。
+    返回码 128 是「没有找到该进程」，不算失败；5 才是拒绝访问。
+    """
     import subprocess
-    failed: list[str] = []
-    for p in runtime.running_processes():
+    denied: list[str] = []
+    for name in C.IDM_PROCESSES:
         try:
-            subprocess.run(
-                ["taskkill", "/PID", str(p.pid), "/T", "/F"],
+            result = subprocess.run(
+                ["taskkill", "/IM", name + ".exe", "/T", "/F"],
                 capture_output=True, timeout=8,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception:
-            failed.append(p.name)
-    return failed
+            denied.append(name)
+            continue
+        if result.returncode == 5:
+            denied.append(name)
+    return denied
 
 
 # ---- 子命令 ------------------------------------------------------------

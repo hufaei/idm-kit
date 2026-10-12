@@ -444,9 +444,24 @@ class App(tk.Tk):
         exe = self.exe
         if exe is None:
             return
+
+        # 关键：必须以普通权限启动 IDM，否则浏览器连不上它。
+        #
+        # 而本工具推荐以管理员身份运行，子进程默认继承管理员令牌 —— 直接
+        # Popen 会把 IDM 拉成 High 完整性级别，浏览器（Medium）就再也无法
+        # 通过 1001 通道连上它，扩展会报 Cannot launch IDM。
+        #
+        # 降权的办法是让 explorer.exe 代跑：它以登录用户身份常驻，
+        # 由它启动的进程自然回到普通权限。
         try:
-            # 关键：必须以普通权限启动，否则浏览器连不上它
-            subprocess.Popen([str(exe)], cwd=str(exe.parent))
+            if runtime.is_elevated():
+                subprocess.Popen(
+                    ["explorer.exe", str(exe)],
+                    cwd=str(exe.parent),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            else:
+                subprocess.Popen([str(exe)], cwd=str(exe.parent))
         except Exception as exc:
             messagebox.showerror("启动失败", str(exc))
             return
