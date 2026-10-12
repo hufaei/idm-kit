@@ -460,6 +460,33 @@ def port_state(port: int = C.BROWSER_PORT) -> str:
         return "unknown"
 
 
+def idm_running() -> tuple[bool | None, str]:
+    """IDM 是否正在运行，以及判断依据。读不出结论时返回 None。
+
+    为什么不以进程枚举为主：枚举结果受调用者权限影响。实测在普通权限下
+    打包后的 exe 只能扫到 23 个进程（同一台机器源码运行能看到 360 个），
+    此时枚举不到 IDMan，会被误判成「没运行」。
+
+    IDM 运行时会监听 127.0.0.1:1001，这个信号不受进程视图影响，所以它优先。
+    端口不通时才退回进程枚举，而且只在进程表读得完整（≥100 个）时采信，
+    否则宁可说「无法确认」，也不给出一个可能是假的「没运行」。
+    """
+    state = port_state(C.BROWSER_PORT)
+    if state == "listening":
+        return True, f"下载通道 {C.BROWSER_PORT} 端口在监听"
+    if state == "occupied":
+        return True, f"{C.BROWSER_PORT} 端口被占用"
+
+    procs = running_processes(("IDMan",))
+    if procs:
+        return True, f"找到 IDMan 进程 pid {procs[0].pid}"
+
+    total = total_process_count()
+    if total >= 100:
+        return False, "下载通道未监听，进程表里也没有 IDMan"
+    return None, f"下载通道未监听，且进程表只读到 {total} 个（不完整，无法确认）"
+
+
 def wfp_service_state() -> str:
     """IDMWFP 驱动服务的状态。
 

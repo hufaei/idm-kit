@@ -281,31 +281,38 @@ def _check_process(
 ) -> tuple[Check, runtime.ProcInfo | None]:
     idm = next((p for p in procs if p.name == "IDMan"), None)
 
-    # 扫描范围只在异常时才说出口。正常桌面有数百个进程，读得到就没必要
-    # 打扰用户；一旦数字偏小，就说明进程视图被限制了，此时"看不到 IDM"
-    # 和"IDM 没运行"是两回事，必须讲清楚。
-    if total < 0:
-        scope = "（进程列表读取失败）"
-    elif total < 100:
-        scope = f"（只扫描到 {total} 个进程，少于正常值，运行环境受限）"
-    else:
-        scope = ""
+    # 判据来自 runtime.idm_running()：端口优先，进程枚举只作补充。
+    # 只看进程列表会在权限不足时误报「没运行」——实测普通权限下这份 exe
+    # 只能扫到 23 个进程，而同一台机器上源码运行能看到 360 个。
+    running, why = runtime.idm_running()
 
-    if idm is None:
+    if running is True:
+        if idm is not None:
+            fact = f"正在运行，pid {idm.pid}，权限 {idm.integrity_label}"
+            meaning = "进程正常"
+        else:
+            # 端口证明它活着，但进程表里看不到它 —— 不必让用户为此操心
+            fact = f"正在运行（{why}）"
+            meaning = "进程正常"
+        others = [p.name for p in procs if p.name != "IDMan"]
+        if others:
+            fact += f"（同时运行：{', '.join(others)}）"
+        return Check("process", "IDM 进程", STATUS_OK, fact=fact, meaning=meaning), idm
+
+    if running is None:
         return Check(
-            "process", "IDM 进程", STATUS_INFO,
-            fact=f"IDM 当前没有运行 {scope}",
-            meaning="要处理文件或使用下载功能时需要启动它",
-            action="点击「启动 IDM」",
+            "process", "IDM 进程", STATUS_WARN,
+            fact=f"无法确认是否在运行（{why}）",
+            meaning="进程表读不完整，通常是权限不足；端口也没在监听",
+            action="以管理员身份运行本工具，判断会更准确",
         ), None
 
-    others = [p.name for p in procs if p.name != "IDMan"]
-    extra = f"（同时运行：{', '.join(others)}）" if others else ""
     return Check(
-        "process", "IDM 进程", STATUS_OK,
-        fact=f"正在运行，pid {idm.pid}，权限 {idm.integrity_label}{extra} {scope}",
-        meaning="进程正常",
-    ), idm
+        "process", "IDM 进程", STATUS_INFO,
+        fact="IDM 当前没有运行",
+        meaning="要处理文件或使用下载功能时需要启动它",
+        action="点击「启动 IDM」",
+    ), None
 
 
 def _check_integrity(idm: runtime.ProcInfo | None) -> Check:
@@ -313,7 +320,8 @@ def _check_integrity(idm: runtime.ProcInfo | None) -> Check:
     if idm is None:
         return Check(
             "integrity", "IDM 运行权限", STATUS_INFO,
-            fact="IDM 未运行", meaning="无法判断权限级别",
+            fact="读不到进程信息",
+            meaning="进程表不完整时无法判断 IDM 的权限级别",
         )
 
     if idm.integrity == "high" or idm.integrity == "system":

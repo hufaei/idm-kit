@@ -318,9 +318,11 @@ class App(tk.Tk):
         self.btn_restore.configure(state="normal" if has_backup else "disabled")
         self.btn_export.configure(state="normal")
 
-        running = any(p.name == "IDMan" for p in runtime.running_processes(("IDMan",)))
-        self.btn_start.configure(state="disabled" if running else "normal")
-        self.btn_stop.configure(state="normal" if running else "disabled")
+        # 端口优先判断，见 runtime.idm_running()：只看进程列表会在权限不足
+        # 时误报「没运行」，而这台机器上实测普通权限下只扫得到 23 个进程。
+        running = runtime.idm_running()[0]
+        self.btn_start.configure(state="disabled" if running is True else "normal")
+        self.btn_stop.configure(state="normal" if running is True else "disabled")
 
     # ---- 动作 ----------------------------------------------------------
 
