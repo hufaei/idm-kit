@@ -62,6 +62,10 @@ $anchorA = [byte[]]@(0xA1,0x24,0xBD,0x77,0x00,0xF7,0xD8,0x1B,0xC0,
 $oldA    = [byte[]]@(0x83,0xE0,0x0F,0x83,0xC0,0x0F)
 $newA    = [byte[]]@(0xB8) + $imm + [byte[]]@(0x90)
 
+# The first 9 bytes of anchor A survive patching, so they can locate site A in
+# an already-patched file (the full 20-byte anchor cannot: its middle is gone).
+$prefixA = [byte[]]@(0xA1,0x24,0xBD,0x77,0x00,0xF7,0xD8,0x1B,0xC0)
+
 # B: .data default of [0x77bd28]. Anchored by an 8-byte run that sits AFTER
 #    the target, never by a hardcoded file offset. The run holds two
 #    linked-base pointers (0x699338, 0x6A03D0) and is unique in the file both
@@ -100,20 +104,34 @@ Write-Host "target : $exeFull"
 Write-Host "version: $ver"
 Write-Host "sha256 : $hash"
 
-$pristine = 'E3FC655A335E17A6FDD09A9B315291D0C8863180F0D801E5DD7433C9E56AFBD8'
-$patchedA = 'AC81B41812EE1BABC3B7E0D606012C706D598ED27B9610E24563494D9D1E8D58'
-if (-not $Force -and $hash -ne $pristine -and $hash -ne $patchedA) {
-    throw "unverified build (sha256 not recognised). Re-run with -Force if sure."
+$bytes = [IO.File]::ReadAllBytes($exeFull)
+
+# ---- idempotency probe (state-driven, independent of -Days) ----
+# A patched file's SHA256 depends on the -Days value, so no fixed hash can
+# enumerate every already-patched state. Decide from the code instead: locate
+# site A by the surviving 9-byte prefix, then let the six bytes after it decide.
+$probeHits = New-Object 'Collections.Generic.List[int]'
+$q = 0
+while ($true) {
+    $i = Find-Bytes -Hay $bytes -Needle $prefixA -Start $q
+    if ($i -lt 0) { break }
+    $probeHits.Add($i); $q = $i + 1
 }
-# Idempotency: once patched, the original anchor A no longer exists, so a second
-# run would fail at the anchor check. The patched hash is decisive, so short out.
-if ($hash -eq $patchedA) {
-    Write-Host 'already patched: this file matches the patched build, nothing to do.' -ForegroundColor Green
-    Write-Host 'rollback: -Revert'
-    return
+if ($probeHits.Count -eq 1) {
+    $mp = $probeHits[0] + 9
+    $curMid = $bytes[$mp..($mp + 5)]
+    if ($curMid[0] -eq 0xB8 -and $curMid[5] -eq 0x90) {
+        $curDays = [BitConverter]::ToUInt32($curMid, 1)
+        Write-Host "already patched: trial limit is currently $curDays days, nothing to do." -ForegroundColor Green
+        Write-Host 'rollback: -Revert'
+        return
+    }
 }
 
-$bytes = [IO.File]::ReadAllBytes($exeFull)
+$pristine = 'E3FC655A335E17A6FDD09A9B315291D0C8863180F0D801E5DD7433C9E56AFBD8'
+if (-not $Force -and $hash -ne $pristine) {
+    throw "unverified build (sha256 not recognised). Re-run with -Force if sure."
+}
 
 # ---------- patch A ----------
 $hits = New-Object 'Collections.Generic.List[int]'
@@ -125,6 +143,9 @@ while ($true) {
 }
 if ($hits.Count -ne 1) { throw "anchor A hit count = $($hits.Count) (need exactly 1). Aborted, untouched." }
 $offA = $hits[0] + 9
+# Display only: 0x400C00 is (linked VA - file offset) for this build, i.e. the
+# distance between file layout and the 0x400000 linked image base. It does not
+# affect the patch itself, only the address printed for reference.
 Write-Host ("A      : anchor at 0x{0:X}, target 0x{1:X} (va 0x{2:X})" -f ($hits[0]), $offA, ($offA + 0x400C00))
 
 $curA = $bytes[$offA..($offA + 5)]

@@ -1,10 +1,16 @@
 #Requires -Version 5.1
 <#
   Static verification: inspect the two patch sites on disk and report state.
-  Read-only, no elevation needed for reading.
+  Read-only, no elevation needed.
 
   Both sites are located by anchor search, never by a hardcoded file offset,
   so the report stays correct even if the image layout differs.
+
+  State is decided by the CONTENT of the patch sites, not by the file hash.
+  A patched file's SHA256 depends on the -Days value that produced it, so a
+  fixed hash can only ever recognise one exact patched build; using it as the
+  primary signal would misreport every other -Days value as an unknown build.
+  The hash is therefore used only to recognise the untouched official build.
 
   Note: the search helper deliberately returns a single int, and the caller
   accumulates hits in an explicit List. Returning a collection from a
@@ -20,16 +26,16 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $pristineSha = 'E3FC655A335E17A6FDD09A9B315291D0C8863180F0D801E5DD7433C9E56AFBD8'
-$patchedSha  = 'AC81B41812EE1BABC3B7E0D606012C706D598ED27B9610E24563494D9D1E8D58'
 
-# Site A's bytes change, so locate it by the 9-byte prefix that survives patching.
+# Site A's middle changes, so locate it by the 9-byte prefix that survives patching.
 $prefixA = [byte[]]@(0xA1,0x24,0xBD,0x77,0x00,0xF7,0xD8,0x1B,0xC0)
-$midOldA = '83 E0 0F 83 C0 0F'
-$midNewA = 'B8 FF E0 F5 05 90'
+$midOldA = '83 E0 0F 83 C0 0F'          # and eax,0xf / add eax,0xf
+# $midNewA is B8 <imm32> 90; the imm32 varies with -Days, so it is parsed
+# rather than compared against a fixed literal.
 
 # Site B: the 8 bytes AFTER the target. The anchor must never contain the
-# patched dword itself (1E 00 00 00), otherwise it disappears as soon as the
-# patch is applied and the report degrades to "anchor found 0x".
+# patched dword itself, otherwise it disappears as soon as the patch is applied
+# and the report degrades to "anchor found 0x".
 $anchorB = [byte[]]@(0x38,0x93,0x69,0x00, 0xD0,0x03,0x6A,0x00)
 $bDelta  = -4
 
@@ -48,6 +54,18 @@ function Find-Bytes {
     return -1
 }
 
+function Find-All {
+    param([byte[]]$Hay, [byte[]]$Needle)
+    $out = New-Object 'Collections.Generic.List[int]'
+    $p = 0
+    while ($true) {
+        $i = Find-Bytes -Hay $Hay -Needle $Needle -Start $p
+        if ($i -lt 0) { break }
+        $out.Add($i); $p = $i + 1
+    }
+    return , $out
+}
+
 function HexOf {
     param([byte[]]$B, [int]$Start, [int]$Len)
     return (($B[$Start..($Start + $Len - 1)] | ForEach-Object { '{0:X2}' -f $_ }) -join ' ')
@@ -61,62 +79,93 @@ $ver = (Get-Item -LiteralPath $exeFull).VersionInfo.FileVersion
 Write-Host "file    : $exeFull"
 Write-Host "version : $ver"
 Write-Host "sha256  : $sha"
-switch ($sha) {
-    $pristineSha { Write-Host "state   : PRISTINE (untouched official build)" -ForegroundColor Yellow }
-    $patchedSha  { Write-Host "state   : PATCHED" -ForegroundColor Green }
-    default      { Write-Host "state   : UNKNOWN build (not in allowlist)" -ForegroundColor Red }
-}
 
 $bytes = [IO.File]::ReadAllBytes($exeFull)
 
 # ---------------- site A ----------------
-Write-Host ''
-$haHits = New-Object 'Collections.Generic.List[int]'
-$p = 0
-while ($true) {
-    $i = Find-Bytes -Hay $bytes -Needle $prefixA -Start $p
-    if ($i -lt 0) { break }
-    $haHits.Add($i); $p = $i + 1
-}
+$haHits = Find-All -Hay $bytes -Needle $prefixA
+$stateA = 'MISSING'
+$daysA  = $null
+$offA   = -1
+
 if ($haHits.Count -eq 0) {
-    Write-Host 'patchA  : site NOT found (unexpected for a known build)' -ForegroundColor Red
+    $stateA = 'MISSING'
 } elseif ($haHits.Count -gt 1) {
-    Write-Host "patchA  : prefix occurs $($haHits.Count)x -- cannot decide" -ForegroundColor Red
+    $stateA = "AMBIGUOUS ($($haHits.Count)x)"
 } else {
-    $hit = $haHits[0]
-    Write-Host "block   : $(HexOf -B $bytes -Start $hit -Len 20)"
-    $mid = HexOf -B $bytes -Start ($hit + 9) -Len 6
-    Write-Host "middle6 : $mid"
-    if ($mid -eq $midNewA) {
-        Write-Host 'patchA  : APPLIED (mov eax,99999999 + nop)' -ForegroundColor Green
-    } elseif ($mid -eq $midOldA) {
-        Write-Host 'patchA  : NOT applied (still and/add arithmetic)' -ForegroundColor Yellow
+    $offA = $haHits[0]
+    $mid = HexOf -B $bytes -Start ($offA + 9) -Len 6
+    $raw = $bytes[($offA + 9)..($offA + 14)]
+    if ($mid -eq $midOldA) {
+        $stateA = 'NOT applied'
+    } elseif ($raw[0] -eq 0xB8 -and $raw[5] -eq 0x90) {
+        $stateA = 'APPLIED'
+        $daysA = [BitConverter]::ToUInt32($raw, 1)
     } else {
-        Write-Host 'patchA  : UNRECOGNISED code at that site' -ForegroundColor Red
+        $stateA = 'UNRECOGNISED'
     }
 }
 
 # ---------------- site B ----------------
-$hbHits = New-Object 'Collections.Generic.List[int]'
-$p = 0
-while ($true) {
-    $i = Find-Bytes -Hay $bytes -Needle $anchorB -Start $p
-    if ($i -lt 0) { break }
-    $hbHits.Add($i); $p = $i + 1
-}
+$hbHits = Find-All -Hay $bytes -Needle $anchorB
+$stateB = 'MISSING'
+$daysB  = $null
+$offB   = -1
+
 if ($hbHits.Count -ne 1) {
-    Write-Host "patchB  : anchor found $($hbHits.Count)x -- cannot decide" -ForegroundColor Red
+    $stateB = "AMBIGUOUS ($($hbHits.Count)x)"
 } else {
     $offB = $hbHits[0] + $bDelta
-    $bval = [BitConverter]::ToUInt32($bytes, $offB)
-    Write-Host ("dataB   : at 0x{0:X}  {1}  -> {2}" -f $offB, (HexOf -B $bytes -Start $offB -Len 4), $bval)
-    if ($bval -eq 99999999) {
-        Write-Host 'patchB  : APPLIED (.data default = 99999999)' -ForegroundColor Green
-    } elseif ($bval -eq 30) {
-        Write-Host 'patchB  : NOT applied (.data default = 30)' -ForegroundColor Yellow
+    $daysB = [BitConverter]::ToUInt32($bytes, $offB)
+    # 30 is the shipped .data default, so it means "untouched". Any other value
+    # is only trustworthy when it agrees with what site A actually encodes --
+    # comparing against a fixed literal would misreport every other -Days value.
+    if ($daysB -eq 30) { $stateB = 'NOT applied' }
+    elseif ($null -ne $daysA -and $daysB -eq $daysA) { $stateB = 'APPLIED' }
+    else { $stateB = "OTHER ($daysB)" }
+}
+
+# ---------------- overall state ----------------
+# Decided from site content, with the hash only disambiguating an untouched build.
+if ($stateA -eq 'APPLIED' -and $stateB -eq 'APPLIED') {
+    if ($daysA -eq $daysB) {
+        Write-Host "state   : PATCHED (trial limit = $daysA days)" -ForegroundColor Green
     } else {
-        Write-Host 'patchB  : UNEXPECTED value' -ForegroundColor Red
+        Write-Host "state   : PATCHED but INCONSISTENT (code=$daysA, data=$daysB)" -ForegroundColor Red
     }
+} elseif ($stateA -eq 'NOT applied' -and $stateB -eq 'NOT applied') {
+    if ($sha -eq $pristineSha) {
+        Write-Host 'state   : PRISTINE (untouched official build)' -ForegroundColor Yellow
+    } else {
+        Write-Host 'state   : NOT PATCHED, but sha256 is not the known official build' -ForegroundColor Red
+    }
+} else {
+    Write-Host 'state   : UNKNOWN (sites disagree or could not be read)' -ForegroundColor Red
+}
+
+# ---------------- detail ----------------
+Write-Host ''
+if ($offA -ge 0) {
+    Write-Host "block   : $(HexOf -B $bytes -Start $offA -Len 20)"
+    Write-Host "middle6 : $(HexOf -B $bytes -Start ($offA + 9) -Len 6)"
+}
+if ($stateA -eq 'APPLIED') {
+    Write-Host "patchA  : APPLIED (mov eax,$daysA + nop)" -ForegroundColor Green
+} elseif ($stateA -eq 'NOT applied') {
+    Write-Host 'patchA  : NOT applied (still and/add arithmetic)' -ForegroundColor Yellow
+} else {
+    Write-Host "patchA  : $stateA" -ForegroundColor Red
+}
+
+if ($offB -ge 0) {
+    Write-Host ("dataB   : at 0x{0:X}  {1}  -> {2}" -f $offB, (HexOf -B $bytes -Start $offB -Len 4), $daysB)
+}
+if ($stateB -eq 'APPLIED') {
+    Write-Host "patchB  : APPLIED (.data default = $daysB)" -ForegroundColor Green
+} elseif ($stateB -eq 'NOT applied') {
+    Write-Host 'patchB  : NOT applied (.data default = 30)' -ForegroundColor Yellow
+} else {
+    Write-Host "patchB  : $stateB" -ForegroundColor Red
 }
 
 # ---------------- backup ----------------

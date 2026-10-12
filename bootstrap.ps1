@@ -72,5 +72,12 @@ Start-Sleep -Seconds 3
 & $PatchScript -ExePath $ExePath
 
 Write-Host ''
-Write-Host 'done. remaining manual step: turn off IDM auto-update,' -ForegroundColor Yellow
-Write-Host 'otherwise Quick Update overwrites IDMan.exe and the patch is lost.' -ForegroundColor Yellow
+Write-Host 'patch applied.' -ForegroundColor Green
+Write-Host ''
+Write-Host 'Two things matter from here:' -ForegroundColor Yellow
+Write-Host '  1. Start IDM as the NORMAL user, never as administrator. An elevated'
+Write-Host '     IDM cannot be reached by browsers (UIPI); the extension then reports'
+Write-Host '     "Cannot launch IDM" even though nothing is broken.'
+Write-Host '  2. Auto-update overwrites IDMan.exe and loses the patch, and there is no'
+Write-Host '     registry switch to disable it. Check state with .\verify.ps1;'
+Write-Host '     if it reports PRISTINE, re-run .\patch-IDM.ps1.'
