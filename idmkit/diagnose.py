@@ -299,6 +299,7 @@ def _check_days(limit: int | None) -> Check:
         return Check(
             "days", "使用期限", STATUS_INFO,
             fact="暂时无法确认",
+            meaning=f"未激活时官方默认是 {C.ORIGINAL_DAYS} 天",
             detail=f"未激活时官方默认是 {C.ORIGINAL_DAYS} 天",
         )
     if limit <= C.ORIGINAL_DAYS:
