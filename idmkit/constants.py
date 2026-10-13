@@ -101,6 +101,87 @@ PATCH_C_OLD = bytes.fromhex("740D")  # je  rel8 +0x0D
 PATCH_C_NEW = bytes.fromhex("EB0D")  # jmp rel8 +0x0D
 PATCH_C_CODE = 2                     # 替换长度必须等于 len(PATCH_C_OLD)
 
+# ---- 补丁 D：取消自动更新 -------------------------------------------------
+#
+# IDM 每次运行都会走一个周期判定，决定「这次要不要去检查更新」。判定逻辑
+# 在 0x56E93，反汇编如下（rva 均为链接基址 0x400000 下的地址）：
+#
+#   0x56ED8  push 'LastCheckQU'
+#   0x56EE4  call RegQueryValueExA      ; 读上次检查的时刻
+#   0x56EEC  jne  0x56F30               ; 读不到 -> 返回 1（该去检查）
+#   0x56EF6  call time()                ; 当前时刻
+#   0x56F01  sub  eax, esi              ; now - LastCheckQU
+#   0x56F07  push 0x15180               ; 86400 秒
+#   0x56F0E  call 0x240a40              ; 64 位有符号除法 -> 已过天数
+#   0x56F13  mov  ecx, 6                ; 阈值：6 天     <- 只替换这 5 字节
+#   0x56F18  cmp  ecx, eax
+#   0x56F1A  sbb  eax, eax
+#   0x56F1C  neg  eax                   ; 返回 (6 > 已过天数)
+#   0x56F2F  ret
+#
+# 返回值 1 才会真的去检查更新。把阈值从 6 改成 0 之后，任何已过天数都满足
+# `0 > days` 为假，函数恒返回 0，等于「不需要检查」。
+#
+# 实测依据（2026-10-13）：删掉注册表 LastCheckQU 后重启 IDM，IDM 在 60 秒内
+# 建立到 67.18.60.145:443 的连接，6 秒后把 LastCheckQU 写成当前时间戳。
+# 也就是说这条链路是活的，且 LastCheckQU 是它自己盖的时间戳。
+#
+# 为什么改阈值而不是改入口：0x56E93 只做「要不要检查」的判断，不涉及下载和
+# 替换，改它不会影响「帮助 -> 检查更新」这个手动入口，也不改变任何界面文案。
+#
+# 锚点取目标之前的三条指令（push edx; push eax; call），不含被改写的 5 字节。
+# 实测该锚点在原始文件与已补丁文件中各命中恰好 1 次。
+
+ANCHOR_D = bytes.fromhex("5250E82D9B1E00")   # 0x56F0C .. 0x56F13
+PATCH_D_AT = 7                               # 目标 = 锚点位置 + 7
+PATCH_D_OLD = bytes.fromhex("B906000000")    # mov ecx, 6
+PATCH_D_NEW = bytes.fromhex("B900000000")    # mov ecx, 0
+PATCH_D_CODE = 5                             # 替换长度必须等于 len(PATCH_D_OLD)
+
+#: 已打过「取消自动更新」的完整文件哈希（A+B+C+D+E，默认天数）。
+#: 只作参考，判据仍以站点内容为准 —— 见 README「状态检查」一节。
+PREV_AUTOUPDATE_STOPPED_SHA256 = ""
+
+# ---- 补丁 E：掐断自动更新的定时器分支 -------------------------------------
+#
+# 补丁 D 只改了「要不要检查」的判据，实测不足以关掉自动更新 —— 因为真正去
+# 检查的那条链路根本不看这个返回值。它的实际触发路径是：
+#
+#   IDM 的窗口过程 0x86D58 用跳转表按消息号分派：
+#       0x86D98  movzx eax, byte ptr [eax + 0x488514]   ; 索引表，一字节一条消息
+#       0x86D9F  jmp   dword ptr [eax*4 + 0x488470]     ; 目标表，四项一条消息
+#   索引 = 消息号 - 1。消息 5 的条目是第 4 项：
+#       rva 0x88518 = 0x02  ->  目标 rva 0x88478 = 0x487C8B
+#
+#   0x487C8B 这个分支做四件事：
+#       0x87C93  KillTimer(hwnd, 5)                     ; 先把自己停掉
+#       0x87CA8  call 0x38430                          ; 问「现在有没有活动」
+#       0x87CB7  je 0x87D0B                            ; 没活动 -> 只重设定时器
+#       0x87CF8  RegSetValueExA('LastCheckQU')          ; 写「刚检查过」的时间戳
+#       0x87D16  SetTimer(hwnd, 5, 0x1D4C0)             ; 2 分钟后再来一次
+#
+# 索引表旁边还有一个 0x28 的条目，指向 0x488449 —— 那个地址是空处理（直接
+# 返回）。把消息 5 的索引字节从 0x02 改成 0x28，这条分支就整条不再执行，
+# 定时器也就没人续期了。
+#
+# 实测依据（2026-10-13）：只打补丁 D 时，清空 LastCheckQU 后重启 IDM，两轮
+# 里有一轮仍然建立到 67.18.60.145:443 的连接并重写时间戳；改成同时打 D 和 E
+# 之后，同样的刺激不再出现连网。
+#
+# 索引表与目标表在文件里是连着的（目标表 rva 0x88470，索引表 rva 0x88514，
+# 相差 0xA4 = 41 项 × 4 字节）。
+#
+# 锚点必须**完全落在目标字节之前**：要改的那个字节本身就是锚点内容的一部分时，
+# 改完之后锚点就消失了，第二次运行既定位不到、也判定不出「已经改过」。这和站点
+# A 用前缀、站点 C 用 PATCH_C_AT 是同一个理由。这里取目标前 12 字节，实测在原
+# 始文件与已补丁文件里都唯一命中。
+
+ANCHOR_E = bytes.fromhex("a77148004984480000282801")
+PATCH_E_AT = 12                              # 目标 = 锚点位置 + 12
+PATCH_E_OLD = bytes.fromhex("02")            # 分派到 0x487C8B（会去检查更新）
+PATCH_E_NEW = bytes.fromhex("28")            # 分派到空处理 0x488449
+PATCH_E_CODE = 1
+
 # ---- 天数 --------------------------------------------------------------
 
 DEFAULT_DAYS = 99999999              # 本工具的默认值
@@ -122,6 +203,7 @@ REG_KEY_MAIN = r"Software\DownloadManager"
 
 REG_VALUE_LAST_CHECK_QU = "LastCheckQU"   # 上次检查更新的 Unix 时间戳
 REG_VALUE_LAST_CHECK = "LstCheck"         # 上次检查更新的可读日期
+REG_VALUE_CHECK_UPDT_VM = "CheckUpdtVM"   # 更新检查状态标记（IDM 写入 "10"）
 REG_VALUE_VERSION_TAG = "idmvers"         # 例："v6.43b15 Trial"
 REG_VALUE_CURRENT_BUILD = "vCOUFP"        # 例："643b15"
 REG_VALUE_LAUNCH_ON_START = "LaunchOnStart"
@@ -143,8 +225,14 @@ IDM_DIR_CANDIDATES = (
     r"C:\Program Files\Internet Download Manager",
 )
 
-#: 二进制中的原文：IDM checks for a new release every 2 weeks
-UPDATE_CHECK_INTERVAL_DAYS = 14
+#: 自动检查更新的周期（天）。
+#:
+#: 取值来自二进制，不是官方帮助里的说法。周期判定在 0x56E93，把「距上次检查
+#: 的天数」算出来之后与 6 比较（0x56F13：mov ecx, 6），返回值 1 才真的去查。
+#: 所以「距上次检查不足 6 天就不再检查（也不重复写时间戳）」是它的真实节奏。
+#: 帮助里那句 "checks for a new release every 2 weeks" 说的是发布节奏，不是
+#: 检查节奏，两者不能混用。
+UPDATE_CHECK_INTERVAL_DAYS = 6
 
 # ---- 浏览器扩展 --------------------------------------------------------
 

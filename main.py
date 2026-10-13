@@ -80,28 +80,58 @@ def cmd_check() -> int:
     return 0 if d.severity == diagnose.STATUS_OK else 1
 
 
+def _stop_running_idm(quiet: bool) -> tuple[bool, str]:
+    """结束正在运行的 IDM。返回 (可以继续, 错误说明)。"""
+    running = runtime.running_processes()
+    if not running:
+        return True, ""
+
+    names = "、".join(sorted({p.name for p in running}))
+    _stop_idm()
+    import time
+    time.sleep(1.5)
+
+    still = runtime.running_processes()
+    if still:
+        return False, (
+            f"以下进程仍在运行，请手动关闭后重试：\n"
+            f"{'、'.join(sorted({p.name for p in still}))}"
+        )
+    if not quiet:
+        _message(f"已自动关闭：{names}")
+    return True, ""
+
+
+def _parse_days(text: str, default: int) -> int:
+    """天数既接受十进制，也接受 0x 开头的十六进制。
+
+    十六进制在这里不是花活：上限字段是 4 字节无符号数，0xFFFFFFFF 这种写法
+    比它的十进制形式好核对得多。
+    """
+    text = (text or "").strip()
+    if not text:
+        return default
+    try:
+        value = int(text, 16) if text.lower().startswith("0x") else int(text, 10)
+    except ValueError:
+        raise patch.PatchError(
+            f"天数「{text}」不是整数。可以写十进制，也可以写 0x 开头的十六进制。"
+        ) from None
+    if not (1 <= value <= 0xFFFFFFFF):
+        raise patch.PatchError("天数必须是 1 到 4294967295（0xFFFFFFFF）之间的整数。")
+    return value
+
+
 def cmd_patch(days: int, quiet: bool) -> int:
     exe = runtime.idm_exe()
     if exe is None:
         _message("找不到 IDM，无法处理。", error=True)
         return 2
 
-    running = runtime.running_processes()
-    if running:
-        names = "、".join(sorted({p.name for p in running}))
-        _stop_idm()
-        import time
-        time.sleep(1.5)
-        still = runtime.running_processes()
-        if still:
-            _message(
-                f"以下进程仍在运行，请手动关闭后重试：\n"
-                f"{'、'.join(sorted({p.name for p in still}))}",
-                error=True,
-            )
-            return 3
-        if not quiet:
-            _message(f"已自动关闭：{names}")
+    ok, err = _stop_running_idm(quiet)
+    if not ok:
+        _message(err, error=True)
+        return 3
 
     try:
         result = patch.apply_patch(exe, days)
@@ -126,6 +156,51 @@ def cmd_patch(days: int, quiet: bool) -> int:
     return 0
 
 
+def cmd_cancel_update(quiet: bool) -> int:
+    """取消自动更新：停掉那条定时器分支，让 IDM 不再自动去查新版本。
+
+    IDM 的实际检查动作由它的窗口过程按消息号分派出去，和「距上次检查过了
+    几天」那个判据是两条独立的链路 —— 只改判据挡不住，两个改写点都要动。
+
+    文件若尚未激活，会一并完成激活 —— 那条路径本来就要改同样的字节，
+    没有理由让使用者分两步走。
+    """
+    exe = runtime.idm_exe()
+    if exe is None:
+        _message("找不到 IDM，无法处理。", error=True)
+        return 2
+
+    ok, err = _stop_running_idm(quiet)
+    if not ok:
+        _message(err, error=True)
+        return 3
+
+    try:
+        # 天数不在这里暴露：本动作的语义是「关掉自动更新」，上限沿用文件里
+        # 已有的值，或者用默认值补齐尚未激活的文件。
+        result = patch.apply_patch(
+            exe, C.DEFAULT_DAYS, cancel_autoupdate=True)
+    except Exception as exc:
+        _message(f"处理失败：\n\n{exc}", error=True)
+        return 4
+
+    lines = [f"文件：{exe}"]
+    if result.days is not None:
+        lines.append(f"试用上限：{result.days} 天")
+    lines.extend(result.lines)
+
+    if result.autoupdate_stopped:
+        head = "自动更新已取消。IDM 不会再自动检查更新、也不会被更新覆盖。"
+    else:
+        head = (
+            "未能确认自动更新已关闭：\n"
+            "IDMan.exe 里找不到可识别的改写点（需要两个都改到）。"
+            "文件未被改动。"
+        )
+    _message(head + "\n\n" + "\n".join(lines))
+    return 0
+
+
 def cmd_restore(quiet: bool) -> int:
     exe = runtime.idm_exe()
     if exe is None:
@@ -138,12 +213,26 @@ def cmd_restore(quiet: bool) -> int:
         time.sleep(1.5)
 
     try:
+        official = patch.is_pristine(patch.sha256_of(
+            exe.with_name(exe.name + C.BACKUP_SUFFIX).read_bytes()))
+    except Exception:
+        official = True   # 备份读不出来时交给 restore() 自己报错
+
+    try:
         result = patch.restore(exe)
     except Exception as exc:
         _message(f"还原失败：\n\n{exc}", error=True)
         return 4
 
-    msg = f"已还原为官方原版。\n\n文件：{exe}"
+    if official:
+        msg = f"已还原为官方原版。\n\n文件：{exe}"
+    else:
+        msg = (
+            "已用备份覆盖了当前的 IDMan.exe。\n\n"
+            "但这份备份并不是官方原版（多半是当初激活后才备份的），"
+            "所以试用期和自动更新不会恢复成官方状态。\n\n"
+            "要真正回到官方原版，请重装 IDM。"
+        )
     if result.warning:
         msg += f"\n\n注意：{result.warning}"
     _message(msg)
@@ -214,14 +303,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g = p.add_mutually_exclusive_group()
     g.add_argument("--patch", action="store_true", help="把试用上限改成指定天数")
+    g.add_argument("--cancel-update", action="store_true",
+                   help="取消自动更新（IDM 不再自动检查新版本）")
     g.add_argument("--restore", action="store_true", help="从备份还原为官方原版")
     g.add_argument("--export", action="store_true", help="导出诊断报告到桌面")
     g.add_argument("--check", action="store_true", help="在终端输出诊断报告")
     g.add_argument("--stop", action="store_true", help="结束所有 IDM 进程（提权后使用）")
 
     p.add_argument(
-        "--days", type=int, default=C.DEFAULT_DAYS,
-        help=f"试用上限天数，默认 {C.DEFAULT_DAYS}",
+        "--days", type=str, default=str(C.DEFAULT_DAYS),
+        help=f"试用上限天数，默认 {C.DEFAULT_DAYS}；也接受 0x 开头的十六进制",
     )
     p.add_argument("--quiet", action="store_true", help="减少提示弹窗")
     return p
@@ -230,8 +321,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.patch:
-        return cmd_patch(args.days, args.quiet)
+    if args.patch or args.cancel_update:
+        try:
+            days = _parse_days(args.days, C.DEFAULT_DAYS)
+        except patch.PatchError as exc:
+            _message(str(exc), error=True)
+            return 2
+        if args.cancel_update:
+            return cmd_cancel_update(args.quiet)
+        return cmd_patch(days, args.quiet)
     if args.restore:
         return cmd_restore(args.quiet)
     if args.export:

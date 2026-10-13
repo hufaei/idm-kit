@@ -418,16 +418,63 @@ def last_check_qu() -> int | None:
         return None
 
 
+def _read_hkcu_str(path: str, value: str) -> str:
+    v = _read_hkcu(path, value)
+    if v is None:
+        return ""
+    if isinstance(v, bytes):
+        return v.hex(" ").upper()
+    return str(v)
+
+
 def version_tag() -> str:
     """注册表里的版本标记，例如 "v6.43b15 Trial"。"""
     v = _read_hkcu(C.REG_KEY_MAIN, C.REG_VALUE_VERSION_TAG)
     return "" if v is None else str(v)
 
 
+@dataclass
+class AutoUpdateState:
+    """自动更新相关注册表项的原始值。
+
+    直接读出数值而不是只给结论，是为了让使用者能自己去 regedit 核对 ——
+    「工具说改好了」和「我亲眼看到值变了」是两种信任强度。
+    """
+
+    last_check_qu: int | None       # LastCheckQU：上次检查的 Unix 时间戳
+    last_check_date: str            # LstCheck：同一时刻的可读写法
+    check_updt_vm: str              # CheckUpdtVM：更新检查状态标记
+    version_tag: str                # idmvers
+    current_build: str              # vCOUFP
+
+    @property
+    def last_check_text(self) -> str:
+        if self.last_check_qu is None or self.last_check_qu <= 0:
+            return ""
+        try:
+            return datetime.fromtimestamp(self.last_check_qu).strftime(
+                "%Y-%m-%d %H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            return ""
+
+
+def autoupdate_state() -> AutoUpdateState:
+    """一次性读出全部与自动更新有关的注册表项。"""
+    return AutoUpdateState(
+        last_check_qu=last_check_qu(),
+        last_check_date=_read_hkcu_str(C.REG_KEY_MAIN, C.REG_VALUE_LAST_CHECK),
+        check_updt_vm=_read_hkcu_str(C.REG_KEY_MAIN, C.REG_VALUE_CHECK_UPDT_VM),
+        version_tag=version_tag(),
+        current_build=_read_hkcu_str(C.REG_KEY_MAIN, C.REG_VALUE_CURRENT_BUILD),
+    )
+
+
 def update_schedule(now: datetime | None = None) -> UpdateSchedule:
     """推算自动更新的时间线。
 
-    依据是二进制里的原文：IDM checks for a new release every 2 weeks。
+    依据是二进制里的原文：周期判定把「距上次检查的天数」与 6 比较
+    （0x56F13 处的 mov ecx, 6），返回值 1 才去检查。所以真实周期是 6 天，
+    不是官方帮助里写的 two weeks —— 后者描述的是发布节奏，不是检查节奏。
     """
     now = now or datetime.now()
     ts = last_check_qu()
