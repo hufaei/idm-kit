@@ -191,13 +191,22 @@ def _check_patch(exe: Path | None, state: patch.PatchState | None) -> Check:
         )
 
     if state.overall == patch.PRISTINE:
+        # 与 _decide 同一根因：文件是原版有两种来路，说法不能混。有 .bak 说明
+        # 处理过、后来被换回；没有则多半还没处理过 —— 对首次使用者讲「被换回了
+        # 官方版本」是错的，它就没被换过。
+        backed_up = (
+            exe is not None
+            and exe.with_name(exe.name + C.BACKUP_SUFFIX).is_file()
+        )
+        meaning = (
+            "补丁没有生效。IDM 自动更新把 IDMan.exe 换回了官方版本"
+            if backed_up
+            else "补丁没有生效。这个文件还是官方原版，多半是还没处理过"
+        )
         return Check(
             "patch", "激活状态", STATUS_FAIL,
             fact="文件是官方原版，未做任何改动",
-            meaning=(
-                "补丁没有生效。最常见的原因是 IDM 自动更新把 IDMan.exe "
-                "换回了官方版本"
-            ),
+            meaning=meaning,
             action="点击「激活」重新处理（几秒钟）",
         )
 
