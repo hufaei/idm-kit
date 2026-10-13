@@ -219,6 +219,16 @@ REG_UNINSTALL_KEYS = (
 )
 REG_VALUE_UNINSTALL_STRING = "UninstallString"
 
+#: 桌面等系统文件夹的真实位置。不能拼 Path.home()/"Desktop" —— 桌面可能被
+#: 重定向到 OneDrive，也可能被企业策略移到别的盘，拼出来的路径在那种机器上
+#: 并不存在。
+REG_KEY_SHELL_FOLDERS = (
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+)
+REG_KEY_USER_SHELL_FOLDERS = (
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+)
+
 #: 最后的后备：注册表都读不到时的猜测。放在最后是因为 IDM 可以装在别处。
 IDM_DIR_CANDIDATES = (
     r"C:\Program Files (x86)\Internet Download Manager",

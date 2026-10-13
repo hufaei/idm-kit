@@ -433,6 +433,36 @@ def version_tag() -> str:
     return "" if v is None else str(v)
 
 
+def desktop_dir() -> Path:
+    """真实的桌面目录。
+
+    不能直接拼 ``Path.home() / "Desktop"``：桌面可以被重定向到 OneDrive，
+    企业环境里也可能被移到别的盘。那种机器上拼出来的路径不存在，而导出时
+    会 mkdir 出一个假的 Desktop 文件夹 —— 用户根本找不着导出的报告。
+
+    注册表是权威来源，两个键都试：
+      - ``Shell Folders`` 里存的是展开后的绝对路径
+      - ``User Shell Folders`` 里可能是 ``%USERPROFILE%\\Desktop`` 这种形式，
+        自己展开一次
+    两个都读不到时才退回拼路径，那是没有注册表可读时的兜底。
+    """
+    for subkey, value in (
+        (C.REG_KEY_SHELL_FOLDERS, "Desktop"),
+        (C.REG_KEY_USER_SHELL_FOLDERS, "Desktop"),
+    ):
+        raw = _read_hkcu(subkey, value)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        expanded = os.path.expandvars(raw.strip())
+        if "%" in expanded:      # 还有没展开的变量，说明这个值不可靠
+            continue
+        p = Path(expanded)
+        if p.is_dir():
+            return p
+
+    return Path.home() / "Desktop"
+
+
 @dataclass
 class AutoUpdateState:
     """自动更新相关注册表项的原始值。

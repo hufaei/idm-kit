@@ -105,7 +105,8 @@ def _readme_hint() -> str:
 def export(dest_dir: Path | None = None, diag: diagnose.Diagnosis | None = None) -> Path:
     """把诊断报告打包成 zip，返回产物路径。"""
     diag = diag or diagnose.diagnose()
-    dest = dest_dir or Path.home() / "Desktop"
+    # 桌面位置从注册表取，不拼 Path.home() —— 见 runtime.desktop_dir 的说明
+    dest = dest_dir or runtime.desktop_dir()
     dest.mkdir(parents=True, exist_ok=True)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
