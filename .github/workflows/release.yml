@@ -40,7 +40,10 @@ jobs:
           }
           $size = (Get-Item $exe).Length / 1MB
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
-          Write-Host "产物大小：{0:N1} MB" -f $size
+          # 格式化要用括号包起来：写成 Write-Host "..." -f $x 时，PowerShell 会把
+          # -f 当成 -ForegroundColor 的简写，报 "Cannot bind parameter
+          # 'ForegroundColor'"，整个 job 挂掉。
+          Write-Host ("产物大小：{0:N1} MB" -f $size)
           Write-Host "SHA256：$hash"
           "SHA256 = $hash" | Out-File -FilePath dist-nuitka/SHA256.txt -Encoding utf8
 
