@@ -35,6 +35,26 @@ def main() -> int:
     onefile = "--onefile" in sys.argv
     console = "--console" in sys.argv
 
+    # 单文件形态会在运行前把自己解压到一个临时目录。默认走 %TEMP%，但在装了
+    # 沙箱组件的机器上，引导器建不出 %TEMP% 下的目录，直接报：
+    #     [PYI-xxxxx:ERROR] Could not create temporary directory!
+    # 它会卡在那儿重试约 100 秒才弹框，每次启动都弹一次。
+    #
+    # 实测（2026-10-13）：同一台机器上
+    #     %TEMP%             -> 失败
+    #     指定 %LOCALAPPDATA% 下的目录 -> 失败
+    #     _MEIPASS2 环境变量  -> 失败
+    #     exe 同级目录 "."    -> 成功（4.7 秒启动，无残留）
+    # 所以单文件默认把解压目录定在 exe 自己所在的位置。exe 放在用户可写的地方
+    # 即可（桌面、下载目录都行）；放进 Program Files 这类只读位置会失败。
+    tmpdir = "." if onefile else None
+    if "--tmpdir" in sys.argv:
+        i = sys.argv.index("--tmpdir")
+        if i + 1 >= len(sys.argv):
+            print("--tmpdir 后面要跟一个目录路径。")
+            return 1
+        tmpdir = sys.argv[i + 1]
+
     if not ENTRY.is_file():
         print(f"找不到入口文件：{ENTRY}")
         return 1
@@ -61,6 +81,8 @@ def main() -> int:
         "--workpath", str(BUILD),
         "--specpath", str(BUILD),
     ]
+    if tmpdir:
+        args += ["--runtime-tmpdir", tmpdir]
     for mod in EXCLUDES:
         args += ["--exclude-module", mod]
     args.append(str(ENTRY))

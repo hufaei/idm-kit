@@ -41,9 +41,10 @@ class Check:
     key: str
     title: str
     status: str
-    fact: str                 # 观察到的
+    fact: str                 # 观察到的（写给人看，界面上直接显示）
     meaning: str              # 说明什么
     action: str = ""          # 该做什么
+    detail: str = ""          # 技术细节：地址、字节、注册表值。只进导出报告
 
     @property
     def mark(self) -> str:
@@ -183,14 +184,12 @@ def _check_patch(exe: Path | None, state: patch.PatchState | None) -> Check:
         )
 
     if state.overall == patch.PATCHED:
-        note = f"　{state.note}" if state.note else ""
+        # 界面上只说结论；具体改了哪几处、变成什么字节，进 detail。
         return Check(
             "patch", "激活状态", STATUS_OK,
-            fact=f"已激活，上限 {state.days} 天，完整性警告已跳过{note}",
-            meaning=(
-                "试用期上限已被改写，不会到期；"
-                "下载时不会再弹出「IDM 主程序文件已损坏」"
-            ),
+            fact=f"已激活　可以正常下载，不会到期",
+            meaning="下载时不会弹出「IDM 主程序文件已损坏」，也不会中断正在进行的下载",
+            detail=state.note or "",
         )
 
     if state.overall == patch.PARTIAL:
@@ -252,9 +251,9 @@ def _check_checksum(exe: Path | None, state: patch.PatchState | None) -> Check:
     """
     if exe is None or state is None or state.overall != patch.PATCHED:
         return Check(
-            "checksum", "PE 校验和", STATUS_INFO,
+            "checksum", "程序文件完好", STATUS_INFO,
             fact="未检查",
-            meaning="文件不在已激活状态，无从判断校验和",
+            meaning="尚未激活，暂时不需要检查这一项",
         )
 
     try:
@@ -264,26 +263,29 @@ def _check_checksum(exe: Path | None, state: patch.PatchState | None) -> Check:
         want = pe.pe_checksum(data)
     except Exception as exc:  # 读不到不该中断整个诊断
         return Check(
-            "checksum", "PE 校验和", STATUS_INFO,
-            fact=f"无法读取：{exc}",
-            meaning="无法判断",
+            "checksum", "程序文件完好", STATUS_INFO,
+            fact=f"读不到文件：{exc}",
+            meaning="无法确认，需要看文件权限",
         )
 
     if stored == want:
         return Check(
-            "checksum", "PE 校验和", STATUS_OK,
-            fact=f"0x{want:08X}，与文件内容自洽",
-            meaning="IDM 不会认为程序文件被改坏",
+            "checksum", "程序文件完好", STATUS_OK,
+            fact="已通过　IDM 不会提示文件损坏",
+            meaning="下载时不会弹出「IDM 主程序文件已损坏」，也不会中断正在进行的下载",
+            detail=f"PE 校验和 = 0x{want:08X}，与文件内容自洽",
         )
 
     return Check(
-        "checksum", "PE 校验和", STATUS_FAIL,
-        fact=f"文件里写的是 0x{stored:08X}，按实际内容算出来应为 0x{want:08X}",
+        "checksum", "程序文件完好", STATUS_FAIL,
+        fact="未通过　IDM 会提示文件损坏",
         meaning=(
-            "补丁改过代码段，但 PE 头里的校验和没跟着更新。"
-            "IDM 会据此报「IDM 主程序文件已损坏」，并冻结正在进行的下载"
+            "改动过程序，但完整性标记没跟着更新，"
+            "IDM 会误以为文件损坏并中断下载"
         ),
-        action="点「激活」补齐校验和即可，不会重打补丁",
+        action="点「激活」补上即可，不会重复改动",
+        detail=(f"文件里记录的是 0x{stored:08X}，"
+                f"按实际内容算出来应为 0x{want:08X}"),
     )
 
 
@@ -308,38 +310,116 @@ def _check_days(limit: int | None) -> Check:
     )
 
 
-def _check_update() -> Check:
-    """自动更新预警。
+def _check_autoupdate(state: patch.PatchState | None) -> Check:
+    """自动更新：给用户看结论，给报告留技术细节。
 
-    这是整个报告里对用户最有价值的一项：更新会把 IDMan.exe 换回官方版本，
-    激活随之失效。与其等它失效后再排查，不如提前说清"还有多久"。
+    界面上一律只说「关没关掉」。地址、注册表值这些放进 detail —— 它们对确认
+    改动是否落地有价值，但堆在界面上只会让人不知道看哪里。
     """
+    item = runtime.autoupdate_state()
+
+    if state is None:
+        return Check(
+            "autoupdate", "自动更新", STATUS_INFO,
+            fact="读不到 IDMan.exe，暂时无法判断",
+            meaning="文件读不出来，也就无法确认自动更新是否已经关闭",
+            action="确认文件权限后点「刷新」",
+        )
+
+    sched = runtime.update_schedule()
+
+    # 技术细节：无论哪种状态都记全，进导出报告
+    tech = [
+        f"判据点 0x56F13 = "
+        + ("0（恒不触发检查）" if state.autoupdate_stopped else "非 0（判据生效）"),
+        f"分派点 0x88518 = "
+        + ("0x28（消息 5 改指空处理，定时器分支不执行）"
+           if state.autoupdate_stopped else "0x02（定时器分支照常执行）"),
+    ]
+    if sched.known:
+        tech.append(f"LastCheckQU = {sched.last_check_ts}"
+                    f"（{item.last_check_text}）")
+        tech.append(f"LstCheck = {item.last_check_date or '(空)'}"
+                    f"　距今约 {sched.days_since} 天")
+    else:
+        tech.append("LastCheckQU = 不存在")
+    detail = "\n".join(tech)
+
+    if state.autoupdate_stopped:
+        return Check(
+            "autoupdate", "自动更新", STATUS_OK,
+            fact="已关闭　IDM 不会再检查新版本",
+            meaning="以后 IDM 不会自动下载新版本来覆盖当前程序，激活也不会因此失效",
+            detail=detail,
+        )
+
+    if state.autoupdate_known:
+        fact = "还开着　IDM 会自动检查新版本"
+        if sched.known:
+            fact += f"（上次检查是 {sched.days_since} 天前）"
+        return Check(
+            "autoupdate", "自动更新", STATUS_WARN,
+            fact=fact,
+            meaning="自动更新随时可能把 IDM 换回官方版本，激活也随之失效",
+            action="点「取消自动更新」，几秒钟完成",
+            detail=detail,
+        )
+
+    return Check(
+        "autoupdate", "自动更新", STATUS_INFO,
+        fact="这个版本的 IDM 无法处理",
+        meaning=(
+            "当前 IDM 不是本工具支持的版本，工具不会做任何修改，"
+            "以免改错地方"
+        ),
+        action="确认 IDM 版本；需要帮助时点「导出诊断」",
+        detail=detail,
+    )
+
+def _check_update(state: patch.PatchState | None) -> Check:
+    """自动更新的时间线预告。
+
+    补丁 D 就位后这条预告失去意义 —— 周期判定恒返回「不需要检查」，
+    再推算「还有几天会检查」只是自相矛盾，所以改为如实说明已关闭。
+    """
+    if state is not None and state.autoupdate_stopped:
+        return Check(
+            "update", "更新周期", STATUS_OK,
+            fact="周期判定已关闭，不再有「下次检查」",
+            meaning=(
+                "取消之前 IDM 按「距上次检查满 6 天就再查一次」的节奏运行；"
+                "现在这个判断恒为「不需要检查」"
+            ),
+        )
+
     sched = runtime.update_schedule()
     if not sched.known:
         return Check(
-            "update", "自动更新", STATUS_INFO,
+            "update", "更新周期", STATUS_INFO,
             fact="注册表里没有检查更新的记录",
             meaning="IDM 可能还没运行过，或该项已被清理",
         )
 
     if sched.overdue:
         return Check(
-            "update", "自动更新", STATUS_WARN,
+            "update", "更新周期", STATUS_WARN,
             fact=f"上次检查 {sched.last_check_text}，约 {sched.days_since} 天前",
             meaning=(
-                "已经超出 IDM 两周一次的检查周期，随时可能更新。"
+                f"已经超出 IDM {C.UPDATE_CHECK_INTERVAL_DAYS} 天一次的检查周期，"
+                "下次启动或下一个定时器到点就会去查。"
                 "更新会把程序换回官方版本，激活随之失效"
             ),
-            action="更新之后重新点一次「激活」即可，几秒钟完成",
+            action="先点「取消自动更新」关掉它，再考虑重打补丁",
         )
 
     return Check(
-        "update", "自动更新", STATUS_OK,
+        "update", "更新周期", STATUS_OK,
         fact=f"上次检查 {sched.last_check_text}，约 {sched.days_since} 天前",
         meaning=(
-            f"按两周的检查周期推算，大约 {sched.days_until_next} 天之后"
-            "才会再次检查更新"
+            f"按 {C.UPDATE_CHECK_INTERVAL_DAYS} 天的周期推算，"
+            f"大约 {sched.days_until_next} 天之后才会再次检查更新"
         ),
+        action="想彻底关掉就点「取消自动更新」",
     )
 
 
@@ -579,7 +659,8 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
     checks.append(_check_checksum(exe, state))
 
     checks.append(_check_days(state.days if state else None))
-    checks.append(_check_update())
+    checks.append(_check_autoupdate(state))
+    checks.append(_check_update(state))
 
     procs = runtime.running_processes()
     total = runtime.total_process_count()
@@ -611,6 +692,17 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
         ctx["site_b"] = state.site_b.state
         ctx["site_b_days"] = state.site_b.days
         ctx["site_c"] = state.site_c.state
+        if state.site_d is not None:
+            ctx["site_d"] = state.site_d.state
+            ctx["site_d_offset"] = state.site_d.offset
+        if state.site_e is not None:
+            ctx["site_e"] = state.site_e.state
+            ctx["site_e_offset"] = state.site_e.offset
+        ctx["autoupdate_stopped"] = state.autoupdate_stopped
+    auto = runtime.autoupdate_state()
+    ctx["reg_last_check_qu"] = auto.last_check_qu
+    ctx["reg_last_check_date"] = auto.last_check_date
+    ctx["reg_check_updt_vm"] = auto.check_updt_vm
     ctx["registry"] = runtime.registry_snapshot()
     ctx["extension_registry"] = runtime.extension_registry()
 
@@ -737,6 +829,24 @@ def _decide(
             update.action,
         )
 
+    # 自动更新已取消：这是使用者主动做的选择，值得在结论里说一声，
+    # 否则报告最后一行的「一切正常」会让人以为更新还在跑。
+    auto = by_key.get("autoupdate")
+    if state is not None and state.autoupdate_stopped:
+        return (
+            "一切正常", STATUS_OK,
+            "IDM 已激活，可以正常下载；自动更新也已经关闭，"
+            "以后不会再被新版本覆盖",
+            "",
+        )
+
+    if auto is not None and auto.status == STATUS_WARN:
+        return (
+            "一切正常，但自动更新仍开着", STATUS_WARN,
+            "自动更新随时可能把 IDMan.exe 换回官方版本，激活随之失效",
+            "点「取消自动更新」把它关掉，几秒钟完成",
+        )
+
     return (
         "一切正常", STATUS_OK,
         f"IDM 已激活，试用上限 {by_key['days'].fact}，"
@@ -767,6 +877,10 @@ def render_text(d: Diagnosis) -> str:
         lines.append(f"       含义：{c.meaning}")
         if c.action:
             lines.append(f"       建议：{c.action}")
+        if c.detail:
+            lines.append("       技术细节：")
+            for dl in c.detail.splitlines():
+                lines.append(f"           {dl}")
         lines.append("")
     lines.append("-" * 62)
     lines.append("环境")

@@ -48,6 +48,64 @@ _STATUS_SYMBOL = {
     diagnose.STATUS_INFO: "·",
 }
 
+# 这些检查项只在排查时才有意义，界面上不显示，但导出报告里一条不少。
+# 「程序版本」「安装目录」这类信息，使用者平时不需要看到；
+# 「更新周期」在自动更新关掉之后更是自相矛盾。
+_TECHNICAL_KEYS = frozenset({
+    "version",   # 程序版本 —— 结论里版本不匹配时会单独提示
+    "update",    # 更新周期预告 —— 关掉自动更新后已无意义
+    "process",   # IDM 进程 —— 按钮状态本身就在反映这件事
+    "driver",    # 网络驱动 —— 只有出故障时才需要看
+    "channel",   # 浏览器通道 —— 同上
+})
+
+
+def _friendly_result(action: str, result) -> str:
+    """把操作结果翻译成用户能看懂的话。
+
+    刻意不包含地址、锚点、字节这类内容 —— 使用者要做的是确认「事情成了没有、
+    我接下来该干什么」，而不是读一份改动清单。想核对细节的人可以点「导出诊断」，
+    完整的技术信息在那里。
+
+    只有出问题时才提到细节：失败是需要排查的，那时信息越多越好。
+    """
+    days = result.days or C.DEFAULT_DAYS
+
+    if action == "cancel-update":
+        if result.autoupdate_stopped:
+            return ("IDM 不会再自动联网检查新版本了，\n"
+                    "以后也不会被新版本覆盖掉。\n\n"
+                    "想核对改动细节，点「导出诊断」。")
+        return ("试用期限制已经处理好了。\n\n"
+                "但自动更新还有一处没能关掉，IDM 仍有可能联网检查新版本。\n"
+                "建议点「导出诊断」把结果发出来。")
+
+    # 「激活」
+    return (f"IDM 已激活，可以正常下载。\n\n"
+            f"不会再出现试用到期（上限 {days} 天）。\n"
+            f"下载时如果弹过「主程序文件已损坏」，也不会再弹。")
+
+
+def _done_text(action: str) -> str:
+    """提权执行完成后给用户的确认。
+
+    提权路径拿不到 result 对象，所以这里只说结论；想看细节就走「导出诊断」。
+    """
+    if action == "cancel-update":
+        return ("IDM 不会再自动检查更新了，\n以后也不会被新版本覆盖掉。")
+    if action == "restore":
+        return ("已还原成官方原版。\n\n"
+                "注意：试用期限制和自动更新也一起恢复成官方状态了。")
+    return ("IDM 已激活，可以正常下载，不会再出现试用到期。")
+
+
+def _title_for(action: str, done: bool) -> str:
+    if action == "cancel-update":
+        return "自动更新已关闭" if done else "取消自动更新"
+    if action == "restore":
+        return "已还原" if done else "还原官方版"
+    return "已激活" if done else "激活"
+
 
 def _is_writable(path: Path) -> bool:
     """实际试着打开来写，而不是读 ACL。
@@ -71,14 +129,16 @@ class App(tk.Tk):
         self.elevated = runtime.is_elevated()
         self.title("IDM 工具（管理员）" if self.elevated else "IDM 工具（普通权限）")
         self.configure(bg=BG)
-        self.geometry("680x620")
-        self.minsize(620, 560)
+        self.geometry("780x660")
+        self.minsize(700, 560)
 
         self.diag: diagnose.Diagnosis | None = None
         self.exe: Path | None = runtime.idm_exe()
         self._watch_job: str | None = None
         self._start_deadline = 0.0
         self._stop_deadline = 0.0
+        # 提权执行完拿不到返回值，先记下待告知的操作，等刷新完成再弹回执。
+        self._pending_notice: tuple[str, str] | None = None
 
         self._build()
         self.refresh()
@@ -209,13 +269,25 @@ class App(tk.Tk):
         bar = tk.Frame(self, bg=BG)
         bar.grid(row=3, column=0, sticky="ew", padx=18)
 
-        self.btn_patch = self._action_button(bar, "激活", self.do_patch, primary=True)
+        # 按「对 IDM 做处理」和「围绕使用」分成左右两组，中间留空。六个按钮
+        # 平铺一排时，使用者要读完每个才能找到要点的那个；分组之后位置固定：
+        # 想改 IDM 就往左看，想开就关就往右看。
+        self.btn_patch = self._action_button(
+            bar, "激活", self.do_patch, primary=True)
+        # 特意与「激活」分开：关掉自动更新是使用者的选择，不该在激活时顺手做掉。
+        self.btn_cancel_update = self._action_button(
+            bar, "取消自动更新", self.do_cancel_update)
         self.btn_restore = self._action_button(bar, "还原官方版", self.do_restore)
-        self.btn_export = self._action_button(bar, "导出诊断", self.do_export)
-        self.btn_start = self._action_button(bar, "启动 IDM", self.do_start)
-        self.btn_stop = self._action_button(bar, "关闭 IDM", self.do_stop)
 
-    def _action_button(self, parent, text, cmd, primary=False) -> tk.Button:
+        self.btn_export = self._action_button(
+            bar, "导出诊断", self.do_export, side="right")
+        self.btn_start = self._action_button(
+            bar, "启动 IDM", self.do_start, side="right")
+        self.btn_stop = self._action_button(
+            bar, "关闭 IDM", self.do_stop, side="right")
+
+    def _action_button(self, parent, text, cmd, primary=False,
+                       side="left") -> tk.Button:
         b = tk.Button(
             parent, text=text, command=cmd,
             bg=ACCENT if primary else CARD,
@@ -224,9 +296,10 @@ class App(tk.Tk):
             activebackground=ACCENT if primary else BG,
             activeforeground="#ffffff" if primary else FG,
             font=("Microsoft YaHei UI", 10),
-            padx=16, pady=7, cursor="hand2",
+            padx=13, pady=7, cursor="hand2",
         )
-        b.pack(side="left", padx=(0, 8))
+        pad = (0, 6) if side == "left" else (6, 0)
+        b.pack(side=side, padx=pad)
         return b
 
     def _build_footer(self) -> None:
@@ -266,6 +339,19 @@ class App(tk.Tk):
         self._render_checks()
         self._render_footer()
         self._sync_buttons()
+        self._flush_pending_notice()
+
+    def _flush_pending_notice(self) -> None:
+        """刷新完成后补发提权操作的回执。
+
+        提权走的是独立进程，拿不到返回值，所以只能等刷新把真实状态读回来，
+        再告诉用户结果 —— 这样回执反映的是文件的实际状态，不是我们的猜测。
+        """
+        pending, self._pending_notice = self._pending_notice, None
+        if pending is None:
+            return
+        action, _ = pending
+        messagebox.showinfo(_title_for(action, done=True), _done_text(action))
 
     def _render_verdict(self) -> None:
         d = self.diag
@@ -283,27 +369,32 @@ class App(tk.Tk):
         if self.diag is None:
             return
 
-        for i, c in enumerate(self.diag.checks):
+        # 界面上只留使用者真正关心的几项：能不能用、自动更新关没关、有没有退路。
+        # 「程序版本」「安装目录」这类只在出问题时才有意义的项从界面上撤下来 ——
+        # 它们一条不少地留在「导出诊断」的报告里，排查时不会缺东西。
+        shown = [c for c in self.diag.checks if c.key not in _TECHNICAL_KEYS]
+
+        for i, c in enumerate(shown):
             row = tk.Frame(self.inner, bg=CARD)
-            row.grid(row=i, column=0, sticky="ew", padx=12, pady=0)
+            row.grid(row=i, column=0, sticky="ew", padx=14, pady=(0, 2))
             row.columnconfigure(1, weight=1)
 
             color = _STATUS_COLOR.get(c.status, MUTED)
             tk.Label(
                 row, text=_STATUS_SYMBOL.get(c.status, "·"), bg=CARD, fg=color,
                 font=("Segoe UI", 9),
-            ).grid(row=0, column=0, sticky="nw", padx=(2, 8), pady=(8, 0))
+            ).grid(row=0, column=0, sticky="nw", padx=(2, 9), pady=(9, 0))
 
             tk.Label(
                 row, text=c.title, bg=CARD, fg=FG,
                 font=("Microsoft YaHei UI", 9, "bold"), anchor="w",
-            ).grid(row=0, column=1, sticky="w", pady=(7, 0))
+            ).grid(row=0, column=1, sticky="w", pady=(8, 0))
 
             tk.Label(
                 row, text=c.fact, bg=CARD, fg=MUTED,
-                font=("Microsoft YaHei UI", 8), anchor="w", justify="left",
+                font=("Microsoft YaHei UI", 9), anchor="w", justify="left",
                 wraplength=520,
-            ).grid(row=1, column=1, sticky="ew", pady=(0, 7))
+            ).grid(row=1, column=1, sticky="ew", pady=(1, 8))
 
         self.inner.columnconfigure(0, weight=1)
 
@@ -328,6 +419,18 @@ class App(tk.Tk):
         self.btn_patch.configure(state=state)
         self.btn_restore.configure(state="normal" if has_backup else "disabled")
         self.btn_export.configure(state="normal")
+
+        # 「取消自动更新」在已关闭时就地变成状态显示，而不是留一个点了没反应的
+        # 按钮 —— 使用者一眼就能看出这件事已经做过了。
+        stopped = bool(self.diag is not None
+                       and self.diag.context.get("autoupdate_stopped"))
+        if stopped:
+            self.btn_cancel_update.configure(
+                state="disabled", text="自动更新已关闭")
+        else:
+            self.btn_cancel_update.configure(
+                state="normal" if installed else "disabled",
+                text="取消自动更新")
 
         # 判据以进程枚举为主，端口不能当作 IDM 在运行的证据 —— 1001 由
         # IDMWFP 驱动常驻占用，驱动在就一直在监听。详见 runtime.idm_running()。
@@ -386,10 +489,42 @@ class App(tk.Tk):
         if not messagebox.askokcancel(
             "还原官方版",
             "将把 IDMan.exe 还原成备份中的官方原版。\n"
-            "还原后试用期会恢复成 30 天。",
+            "还原后试用期会恢复成 30 天，自动更新也会恢复开启。",
         ):
             return
         self._run_inline_action("restore")
+
+    def do_cancel_update(self) -> None:
+        if self.exe is None:
+            return
+        if not messagebox.askokcancel(
+            "取消自动更新",
+            "将改写 IDMan.exe 里「要不要检查更新」的周期判定，"
+            "让 IDM 不再自动去查新版本。\n\n"
+            "处理前需要先关闭 IDM（如果正在运行）。\n"
+            "这个改动独立于「激活」，只影响自动更新。\n"
+            "想恢复自动更新，点「还原官方版」即可。\n\n"
+            "过程中可能弹出一次管理员授权，请点「是」。",
+        ):
+            return
+        self._run_inline_action("cancel-update")
+
+    def _is_official_bak(self) -> bool:
+        """备份是不是真正的官方原版。
+
+        IDM 自动更新覆盖 IDMan.exe 之后，用户往往会在覆盖后才点「激活」，
+        于是 .bak 存下来的其实是「被覆盖的那个版本」而不是官方原版；老版本
+        的 .bak 也可能根本是打过补丁的。还原前必须确认，否则那句「已还原为
+        官方原版」就是假的。
+        """
+        if self.exe is None:
+            return False
+        bak = self.exe.with_name(self.exe.name + C.BACKUP_SUFFIX)
+        try:
+            data = bak.read_bytes()
+        except OSError:
+            return False
+        return patch.is_pristine(patch.sha256_of(data))
 
     def _run_inline_action(self, action: str) -> None:
         """尽量不提权。
@@ -401,42 +536,75 @@ class App(tk.Tk):
         if exe is None:
             return
 
+        label = {"patch": "激活", "restore": "还原官方版",
+                 "cancel-update": "取消自动更新"}.get(action, action)
+        days = C.DEFAULT_DAYS
+
+        # 「取消自动更新」既要能在激活过的文件上补打，也要能独立使用，所以
+        # 只有它带 cancel_autoupdate=True；「激活」不动自动更新。
+        if action == "restore":
+            official = self._is_official_bak()
+
         writable = _is_writable(exe)
-        if writable and action == "patch":
+        if writable:
             try:
-                result = patch.apply_patch(exe, C.DEFAULT_DAYS)
+                if action == "restore":
+                    result = patch.restore(exe)
+                else:
+                    result = patch.apply_patch(
+                        exe, days, cancel_autoupdate=(action == "cancel-update"))
             except Exception as exc:
                 messagebox.showerror("失败", str(exc))
                 return
-            if result.changed:
-                detail = "\n".join(f"　{line}" for line in result.lines)
+
+            if action == "restore":
+                if official:
+                    text = ("已还原成官方原版。\n\n"
+                            "注意：试用期限制和自动更新也一起恢复成官方状态了。")
+                else:
+                    text = (
+                        "已把备份里的文件装回去了。\n\n"
+                        "但这份备份不是官方原版（多半是当初激活之后才做的备份），"
+                        "所以试用期和自动更新并没有恢复成官方状态。\n\n"
+                        "要真正回到官方原版，需要重新安装 IDM。"
+                    )
+                messagebox.showinfo(_title_for(action, done=True), text)
+                self.refresh()
+                return
+
+            if not result.changed:
                 messagebox.showinfo(
-                    "完成",
-                    f"处理完成，无需管理员权限。\n\n"
-                    f"试用上限：{result.days} 天\n文件：{exe}"
-                    + (f"\n\n{detail}" if detail else ""),
+                    "已经处理过了",
+                    "当前不需要再做改动。\n\n"
+                    "IDM 已经是激活状态，说明之前处理过。\n"
+                    "想核对细节可以点「导出诊断」。",
+                )
+                self.refresh()
+                return
+
+            if action == "cancel-update" and not result.autoupdate_stopped:
+                detail = "\n".join(f"　{line}" for line in result.lines)
+                messagebox.showwarning(
+                    "没能完全关掉",
+                    "试用期限制已经处理好了。\n\n"
+                    "但自动更新还有一处没能关掉，IDM 仍有可能联网检查新版本。\n"
+                    "建议点「导出诊断」把结果发出来。\n\n"
+                    f"技术细节：\n{detail}",
                 )
             else:
-                messagebox.showinfo("无需处理", "当前状态不需要改动。")
+                title = _title_for(action, done=True)
+                messagebox.showinfo(title, _friendly_result(action, result))
             self.refresh()
             return
 
-        if writable and action == "restore":
-            try:
-                result = patch.restore(exe)
-            except Exception as exc:
-                messagebox.showerror("失败", str(exc))
-                return
-            messagebox.showinfo("完成", f"已还原为官方原版，无需管理员权限。\n\n{exe}")
-            self.refresh()
-            return
-
-        # 文件不可写，只能提权
+        # 文件不可写，只能提权。注意这里必须给回执 —— 早先的版本执行完只是
+        # 静默刷新，用户在提权场景下完全看不到「到底改没改」，只能靠猜。
         ok, err = self._elevated_run([f"--{action}", "--quiet"])
         if not ok:
             messagebox.showerror("失败", err)
             return
-        self.after(1200, self.refresh)
+        self._pending_notice = (action, "")
+        self.after(900, self.refresh)
 
     def do_export(self) -> None:
         try:
