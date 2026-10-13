@@ -55,6 +55,53 @@ def ensure_writable(data: bytes, at: int, length: int, what: str, size: int) -> 
         )
 
 
+def checksum_field_offset(data: bytes) -> int:
+    """返回 OptionalHeader.CheckSum 字段的文件偏移。
+
+    CheckSum 在 OptionalHeader 内部的位置对 PE32 与 PE32+ 都是固定的（偏移 64），
+    但 OptionalHeader 自身的起点要靠 e_lfanew 推出来，所以这里不写死任何绝对
+    偏移 —— 换一个编译产物依然能定位。
+    """
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        raise PatchError("不是 PE 文件：缺少 MZ 头。")
+    e_lfanew = int.from_bytes(data[0x3C:0x40], "little")
+    if e_lfanew < 0x40 or e_lfanew + 24 > len(data):
+        raise PatchError(f"PE 头偏移 0x{e_lfanew:X} 越界，文件结构异常。")
+    if data[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+        raise PatchError("不是 PE 文件：缺少 PE 签名。")
+    opt = e_lfanew + 24
+    opt_size = int.from_bytes(data[e_lfanew + 20:e_lfanew + 22], "little")
+    magic = int.from_bytes(data[opt:opt + 2], "little")
+    if magic not in (0x10B, 0x20B):
+        raise PatchError(f"未知的 OptionalHeader Magic：0x{magic:X}。")
+    if opt_size < 68 or opt + 68 > len(data):
+        raise PatchError("OptionalHeader 太小，读不到 CheckSum 字段。")
+    return opt + 64
+
+
+def pe_checksum(data: bytes) -> int:
+    """按 Windows 的 CheckSumMappedFile 算法计算 PE 校验和。
+
+    规则是把文件按 16 位小端字累加进一个 32 位累加器，每次累加后把高 16 位折回
+    低位，最后加上文件长度。CheckSum 字段自身按 0 参与计算，所以同一个函数既能
+    算出"应该写进去的值"，也能用来验证已写入的值是否自洽。
+    """
+    at = checksum_field_offset(data)
+    total = 0
+    size = len(data)
+    i = 0
+    while i + 1 < size:
+        word = 0 if (i == at or i == at + 2) else (data[i] | (data[i + 1] << 8))
+        total += word
+        total = (total & 0xFFFF) + (total >> 16)
+        i += 2
+    if size & 1:
+        total += data[size - 1]
+        total = (total & 0xFFFF) + (total >> 16)
+    total = (total & 0xFFFF) + (total >> 16)
+    return (total + size) & 0xFFFFFFFF
+
+
 @dataclass(frozen=True)
 class Site:
     """一个改写站点。

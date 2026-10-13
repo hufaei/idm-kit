@@ -12,7 +12,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import constants as C
-from .pe import PatchError, Site, find_all, hex_at
+from .pe import (
+    PatchError,
+    Site,
+    checksum_field_offset,
+    find_all,
+    hex_at,
+    pe_checksum,
+)
 
 # ---- 站点状态取值 ------------------------------------------------------
 
@@ -202,10 +209,35 @@ def apply_patch(exe: Path, days: int, force: bool = False) -> PatchResult:
     # 幂等：先看是不是已经打过了。用补丁后仍存在的前缀定位，不依赖哈希。
     state = inspect(data)
     if state.is_patched:
+        # 补丁本身已就位，但校验和可能还是旧的：早期版本只改字节、不重算它，
+        # 那样的文件会让 IDM 报「主程序文件已损坏」。所以这里不能直接收工。
+        cs_at = checksum_field_offset(data)
+        cs_stored = int.from_bytes(data[cs_at:cs_at + 4], "little")
+        cs_want = pe_checksum(data)
+        if cs_stored == cs_want:
+            return PatchResult(
+                ok=True, changed=False, days=state.days,
+                sha_before=sha_before, sha_after=sha_before, backup=None,
+                lines=[
+                    f"当前上限已经是 {state.days} 天，PE 校验和自洽，无需处理。"
+                ],
+            )
+        buf = bytearray(data)
+        buf[cs_at:cs_at + 4] = cs_want.to_bytes(4, "little")
+        exe.write_bytes(bytes(buf))
+        verify = exe.read_bytes()
+        if int.from_bytes(verify[cs_at:cs_at + 4], "little") != pe_checksum(verify):
+            raise PatchError(
+                "PE 校验和修复后回读不一致，文件头与实际内容对不上。\n"
+                f"请用备份还原：{exe.with_name(exe.name + C.BACKUP_SUFFIX)}"
+            )
         return PatchResult(
-            ok=True, changed=False, days=state.days,
-            sha_before=sha_before, sha_after=sha_before, backup=None,
-            lines=[f"当前上限已经是 {state.days} 天，无需处理。"],
+            ok=True, changed=True, days=state.days,
+            sha_before=sha_before, sha_after=sha256_of(verify), backup=None,
+            lines=[
+                f"当前上限已经是 {state.days} 天，补丁无需重打。",
+                f"PE 校验和：0x{cs_stored:08X} → 0x{cs_want:08X}",
+            ],
         )
 
     # 白名单：只接受未被改动的官方文件。
@@ -237,6 +269,15 @@ def apply_patch(exe: Path, days: int, force: bool = False) -> PatchResult:
         at = site.locate(bytes(buf))
         buf[at:at + site.length] = site.new
 
+    # 补丁改的是代码段，PE 头里的 CheckSum 必须跟着重算。IDM 用它做自身完整性
+    # 检查：字段与实际内容对不上就报「IDM 主程序文件已损坏」并冻结下载，直到
+    # 用户重装。只改字节不重算校验和，等于亲手把这份文件标记成损坏。
+    cs_at = checksum_field_offset(bytes(buf))
+    cs_old = int.from_bytes(buf[cs_at:cs_at + 4], "little")
+    cs_new = pe_checksum(bytes(buf))
+    buf[cs_at:cs_at + 4] = cs_new.to_bytes(4, "little")
+    lines.append(f"PE 校验和：0x{cs_old:08X} → 0x{cs_new:08X}")
+
     exe.write_bytes(bytes(buf))
 
     # 回读校验：确认落盘的字节真的是我们想要的。
@@ -245,6 +286,13 @@ def apply_patch(exe: Path, days: int, force: bool = False) -> PatchResult:
     if not after.is_patched or after.days != days:
         raise PatchError(
             "写入后的回读校验未通过，文件可能已损坏。\n"
+            f"请用备份还原：{backup_path}"
+        )
+
+    # 校验和同样要回读确认，否则文件会带着一个自相矛盾的头。
+    if int.from_bytes(verify[cs_at:cs_at + 4], "little") != pe_checksum(verify):
+        raise PatchError(
+            "PE 校验和回读不一致，文件头与实际内容对不上。\n"
             f"请用备份还原：{backup_path}"
         )
 
