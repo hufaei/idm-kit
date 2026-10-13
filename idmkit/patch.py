@@ -115,13 +115,24 @@ def build_sites(
             )
         )
     if silence_nag:
+        # 两个分派器是同一个调度开关里的兄弟 case，只杀一个另一个照弹
+        # （2026-10-14 实测踩过），必须成对落地。
         sites.append(
             Site(
-                name="补丁 F（静默催购弹窗）",
+                name="补丁 F1（静默催购弹窗·分派一）",
                 anchor=C.ANCHOR_F,
                 delta=C.PATCH_F_AT,
                 old=C.PATCH_F_OLD,
                 new=C.PATCH_F_NEW,
+            )
+        )
+        sites.append(
+            Site(
+                name="补丁 F2（静默催购弹窗·分派二）",
+                anchor=C.ANCHOR_F2,
+                delta=C.PATCH_F2_AT,
+                old=C.PATCH_F2_OLD,
+                new=C.PATCH_F2_NEW,
             )
         )
     return sites
@@ -148,6 +159,7 @@ class PatchState:
     site_d: SiteState | None = None
     site_e: SiteState | None = None
     site_f: SiteState | None = None
+    site_f2: SiteState | None = None
     note: str = ""
     #: 自动更新两个站点的状态说明。
     #: 必须与 note 分开：note 的语义是「这次上限改动有没有实际意义」，
@@ -183,13 +195,18 @@ class PatchState:
 
     @property
     def nag_silenced(self) -> bool:
-        """催购弹窗是否已被静默（补丁 F 就位）。"""
-        return self.site_f is not None and self.site_f.state == APPLIED
+        """催购弹窗是否已被静默（两个分派器入口都就位）。"""
+        return all(
+            s is not None and s.state == APPLIED for s in (self.site_f, self.site_f2)
+        )
 
     @property
     def nag_known(self) -> bool:
-        """补丁 F 站点是否可判定。旧文件或被换过的文件可能找不到它。"""
-        return self.site_f is not None and self.site_f.state in (APPLIED, NOT_APPLIED)
+        """补丁 F 站点是否可判定。旧文件或被换过的文件可能找不到它们。"""
+        return all(
+            s is not None and s.state in (APPLIED, NOT_APPLIED)
+            for s in (self.site_f, self.site_f2)
+        )
 
 
 def _inspect_site_a(data: bytes) -> SiteState:
@@ -307,26 +324,40 @@ def _inspect_site_c(data: bytes) -> SiteState:
 
 
 def _inspect_site_f(data: bytes) -> SiteState:
-    """读取催购弹窗生成函数的入口字节。
+    """读取第一个催购分派器（0x4757D0）的入口字节。
 
     锚点在目标之后 2 字节起（push 0x66885B ; mov eax, fs:[0]），不含被改的
     那个 0x6A，补丁落地后锚点依然命中 —— 与站点 C/D/E 取目标之前的理由相同：
     锚点永远不能包含被自己改写的字节。目标在其前面，所以 delta 是负数。
     """
-    hits = find_all(data, C.ANCHOR_F)
+    return _inspect_entry_site(data, C.ANCHOR_F, C.PATCH_F_AT,
+                               C.PATCH_F_OLD, C.PATCH_F_NEW)
+
+
+def _inspect_site_f2(data: bytes) -> SiteState:
+    """读取第二个催购分派器（0x47C880）的入口字节，锚点规则同上。"""
+    return _inspect_entry_site(data, C.ANCHOR_F2, C.PATCH_F2_AT,
+                               C.PATCH_F2_OLD, C.PATCH_F2_NEW)
+
+
+def _inspect_entry_site(
+    data: bytes, anchor: bytes, delta: int, old: bytes, new: bytes
+) -> SiteState:
+    """按「锚点 + 负偏移」读一个函数入口字节型站点。"""
+    hits = find_all(data, anchor)
     if not hits:
         return SiteState(MISSING)
     if len(hits) > 1:
         return SiteState(AMBIGUOUS, hits=len(hits))
 
-    at = hits[0] + C.PATCH_F_AT
-    if at < 0 or at + C.PATCH_F_CODE > len(data):
+    at = hits[0] + delta
+    if at < 0 or at + len(old) > len(data):
         return SiteState(UNRECOGNISED, offset=at)
 
-    cur = data[at:at + C.PATCH_F_CODE]
-    if cur == C.PATCH_F_OLD:
+    cur = data[at:at + len(old)]
+    if cur == old:
         return SiteState(NOT_APPLIED, offset=at)
-    if cur == C.PATCH_F_NEW:
+    if cur == new:
         return SiteState(APPLIED, offset=at)
     return SiteState(UNRECOGNISED, offset=at)
 
@@ -339,6 +370,7 @@ def inspect(data: bytes) -> PatchState:
     d = _inspect_site_d(data)
     e = _inspect_site_e(data)
     f = _inspect_site_f(data)
+    f2 = _inspect_site_f2(data)
 
     # 自动更新的说明要按 D、E 两个站点各自的状态说，不能只看一个 —— 只打了 D
     # 而没打 E 的时候，更新其实照样会发生（实测）。
@@ -361,21 +393,21 @@ def inspect(data: bytes) -> PatchState:
                     f"当前上限 {a.days} 天不高于官方默认的 {C.ORIGINAL_DAYS} 天，"
                     "这次修改没有任何效果。"
                 )
-            return PatchState(PATCHED, a.days, a, b, c, d, e, f, note, auto_note)
+            return PatchState(PATCHED, a.days, a, b, c, d, e, f, f2, note, auto_note)
         return PatchState(
-            INCONSISTENT, None, a, b, c, d, e, f,
+            INCONSISTENT, None, a, b, c, d, e, f, f2,
             f"两处数值不一致（代码 {a.days} / 数据 {b.days}）。", auto_note,
         )
 
     if (a.state == NOT_APPLIED and b.state == NOT_APPLIED
             and c.state == NOT_APPLIED):
-        return PatchState(PRISTINE, None, a, b, c, d, e, f, "", auto_note)
+        return PatchState(PRISTINE, None, a, b, c, d, e, f, f2, "", auto_note)
 
     # A、B 已就位而 C 未打：这是本工具早期版本的产物。不是错误，但警告框会
     # 一直弹、下载一直被冻结，必须显式提示用户补一次。
     if a.state == APPLIED and b.state == APPLIED and c.state == NOT_APPLIED:
         return PatchState(
-            PARTIAL, a.days, a, b, c, d, e, f,
+            PARTIAL, a.days, a, b, c, d, e, f, f2,
             "试用上限已改，但完整性警告还没跳过 —— 下载时仍会弹出"
             "「IDM 主程序文件已损坏」并冻结下载。再执行一次即可补齐。",
             auto_note,
@@ -384,9 +416,9 @@ def inspect(data: bytes) -> PatchState:
     detail = "、".join(
         f"{name}={st.state}"
         for name, st in (("代码", a), ("数据", b), ("警告", c),
-                         ("判据", d), ("定时器", e), ("催购", f))
+                         ("判据", d), ("定时器", e), ("催购一", f), ("催购二", f2))
     )
-    return PatchState(UNKNOWN, None, a, b, c, d, e, f,
+    return PatchState(UNKNOWN, None, a, b, c, d, e, f, f2,
                       f"状态无法判定（{detail}）。", auto_note)
 
 

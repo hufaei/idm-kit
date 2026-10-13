@@ -451,19 +451,19 @@ def _check_nag(state: patch.PatchState | None) -> Check:
             "nag", "催购弹窗", STATUS_OK,
             fact="已静默　添加下载时不会再弹「试用结束，请购买」",
             meaning="生成弹窗的函数入口已被改成直接返回，两条催购文案一并失效",
-            detail="催购弹窗入口 = 0xC3（直接返回）",
+            detail="两个催购分派器入口 = 0xC3（直接返回）",
         )
 
     if state.nag_known:
         return Check(
             "nag", "催购弹窗", STATUS_WARN,
-            fact="未注册状态下每次添加下载都会弹一次「试用结束」的置顶提示",
+            fact="未注册状态下每次添加下载都会弹「试用结束」的置顶提示，约 10 分钟还会再弹一次",
             meaning=(
                 "这是催购提示，不影响下载；但也容易让人误以为激活没成功。"
                 "它与试用上限是两套独立机制，上限补丁对它无效"
             ),
             action="嫌它烦就点「静默催购弹窗」，几秒钟完成",
-            detail="催购弹窗入口 = 0x6A（原样，弹窗照常）",
+            detail="催购分派器入口 = 0x6A（原样，弹窗照常；两个分派器任一未改都会弹）",
         )
 
     return Check(
@@ -762,6 +762,9 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
         if state.site_f is not None:
             ctx["site_f"] = state.site_f.state
             ctx["site_f_offset"] = state.site_f.offset
+        if state.site_f2 is not None:
+            ctx["site_f2"] = state.site_f2.state
+            ctx["site_f2_offset"] = state.site_f2.offset
         ctx["autoupdate_stopped"] = state.autoupdate_stopped
         ctx["nag_silenced"] = state.nag_silenced
     auto = runtime.autoupdate_state()
