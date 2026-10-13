@@ -1,0 +1,85 @@
+name: 构建并发布
+
+# 打 tag 时自动构建并发布；也可以手动触发，只出产物不发 Release。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装 Nuitka
+        run: python -m pip install --upgrade pip nuitka
+
+      - name: 编译成单文件 exe
+        run: python build-nuitka.py
+
+      - name: 核对产物
+        shell: pwsh
+        run: |
+          $exe = "dist-nuitka/IDM-Tool.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "没有产出 $exe"
+            Get-ChildItem -Recurse dist-nuitka | Select-Object -First 30 FullName
+            exit 1
+          }
+          $size = (Get-Item $exe).Length / 1MB
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Write-Host "产物大小：{0:N1} MB" -f $size
+          Write-Host "SHA256：$hash"
+          "SHA256 = $hash" | Out-File -FilePath dist-nuitka/SHA256.txt -Encoding utf8
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: IDM-Tool-windows
+          path: |
+            dist-nuitka/IDM-Tool.exe
+            dist-nuitka/SHA256.txt
+            使用说明.md
+
+      # 官方安装包不放进仓库（.gitignore 已排除 samples/），需要它作为附件时
+      # 在下面的步骤里自行提供 —— 仓库里不保存第三方安装程序。
+      - name: 生成 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-nuitka/IDM-Tool.exe
+            使用说明.md
+            README.md
+          generate_release_notes: true
+          body: |
+            ## 下载哪个
+
+            | 文件 | 说明 |
+            |---|---|
+            | `IDM-Tool.exe` | 主程序，单文件，双击即用 |
+            | `使用说明.md` | 使用手册，先看这个 |
+
+            ## 用法
+
+            1. 下载 `IDM-Tool.exe`，放到一个**可写**的位置（桌面、下载目录都行）
+            2. 双击运行，先点「激活」
+            3. 再点「取消自动更新」，避免 IDM 把自己更新回去
+
+            ## 注意
+
+            - 支持 IDM 6.43 build 15。版本不符时工具会拒绝改动，不会写错字节
+            - 主程序需要写入 IDM 安装目录，会弹一次管理员授权
+            - 不要把 exe 放进 `C:\Program Files`：它需要在旁边解压运行库

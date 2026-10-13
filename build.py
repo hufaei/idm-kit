@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-APP_NAME = "IDM工具"
+APP_NAME = "IDM-Tool"
 ENTRY = ROOT / "main.py"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"

@@ -52,11 +52,13 @@ _STATUS_SYMBOL = {
 # 「程序版本」「安装目录」这类信息，使用者平时不需要看到；
 # 「更新周期」在自动更新关掉之后更是自相矛盾。
 _TECHNICAL_KEYS = frozenset({
-    "version",   # 程序版本 —— 结论里版本不匹配时会单独提示
-    "update",    # 更新周期预告 —— 关掉自动更新后已无意义
-    "process",   # IDM 进程 —— 按钮状态本身就在反映这件事
-    "driver",    # 网络驱动 —— 只有出故障时才需要看
-    "channel",   # 浏览器通道 —— 同上
+    "version",    # 程序版本 —— 结论里版本不匹配时会单独提示
+    "install",    # 安装路径 —— 使用者不需要知道装在哪
+    "update",     # 更新周期预告 —— 关掉自动更新后已无意义
+    "process",    # IDM 进程 —— 按钮状态本身就在反映这件事
+    "driver",     # 网络驱动 —— 只有出故障时才需要看
+    "channel",    # 浏览器通道 —— 同上
+    "integrity",  # IDM 运行权限 —— 底部已经提示过一次，列表里不必再说
 })
 
 
@@ -268,26 +270,30 @@ class App(tk.Tk):
     def _build_actions(self) -> None:
         bar = tk.Frame(self, bg=BG)
         bar.grid(row=3, column=0, sticky="ew", padx=18)
+        # 中间一列吃掉多余宽度，把两组按钮分别推到最左和最右。用 grid 而不是
+        # pack(side=...)，是为了让左右分组由明确的列号决定，不依赖创建顺序。
+        bar.columnconfigure(2, weight=1)
 
         # 按「对 IDM 做处理」和「围绕使用」分成左右两组，中间留空。六个按钮
         # 平铺一排时，使用者要读完每个才能找到要点的那个；分组之后位置固定：
-        # 想改 IDM 就往左看，想开就关就往右看。
+        # 想改 IDM 就往左看，想开或关就往右看。
         self.btn_patch = self._action_button(
-            bar, "激活", self.do_patch, primary=True)
+            bar, 0, "激活", self.do_patch, primary=True)
         # 特意与「激活」分开：关掉自动更新是使用者的选择，不该在激活时顺手做掉。
         self.btn_cancel_update = self._action_button(
-            bar, "取消自动更新", self.do_cancel_update)
-        self.btn_restore = self._action_button(bar, "还原官方版", self.do_restore)
+            bar, 1, "取消自动更新", self.do_cancel_update)
+        self.btn_restore = self._action_button(
+            bar, 2, "还原官方版", self.do_restore)
 
         self.btn_export = self._action_button(
-            bar, "导出诊断", self.do_export, side="right")
+            bar, 4, "导出诊断", self.do_export)
         self.btn_start = self._action_button(
-            bar, "启动 IDM", self.do_start, side="right")
+            bar, 5, "启动 IDM", self.do_start)
         self.btn_stop = self._action_button(
-            bar, "关闭 IDM", self.do_stop, side="right")
+            bar, 6, "关闭 IDM", self.do_stop)
 
-    def _action_button(self, parent, text, cmd, primary=False,
-                       side="left") -> tk.Button:
+    def _action_button(self, parent, col: int, text, cmd,
+                       primary=False) -> tk.Button:
         b = tk.Button(
             parent, text=text, command=cmd,
             bg=ACCENT if primary else CARD,
@@ -298,8 +304,7 @@ class App(tk.Tk):
             font=("Microsoft YaHei UI", 10),
             padx=13, pady=7, cursor="hand2",
         )
-        pad = (0, 6) if side == "left" else (6, 0)
-        b.pack(side=side, padx=pad)
+        b.grid(row=0, column=col, sticky="w", padx=(0, 6))
         return b
 
     def _build_footer(self) -> None:
@@ -424,13 +429,12 @@ class App(tk.Tk):
         # 按钮 —— 使用者一眼就能看出这件事已经做过了。
         stopped = bool(self.diag is not None
                        and self.diag.context.get("autoupdate_stopped"))
-        if stopped:
-            self.btn_cancel_update.configure(
-                state="disabled", text="自动更新已关闭")
-        else:
-            self.btn_cancel_update.configure(
-                state="normal" if installed else "disabled",
-                text="取消自动更新")
+        # 加勾但**不改名**：按钮叫「取消自动更新」就一直是这个名字，做过了用
+        # 勾和置灰表示。改名字会让使用者下次找不到自己刚才点的那个按钮。
+        self.btn_cancel_update.configure(
+            text="✓ 取消自动更新" if stopped else "取消自动更新",
+            state="disabled" if stopped else ("normal" if installed else "disabled"),
+        )
 
         # 判据以进程枚举为主，端口不能当作 IDM 在运行的证据 —— 1001 由
         # IDMWFP 驱动常驻占用，驱动在就一直在监听。详见 runtime.idm_running()。

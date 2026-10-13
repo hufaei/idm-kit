@@ -9,6 +9,7 @@ __pycache__/
 # 打包产物
 build/
 dist/
+dist-nuitka/
 *.spec
 
 # 诊断导出

@@ -290,23 +290,30 @@ def _check_checksum(exe: Path | None, state: patch.PatchState | None) -> Check:
 
 
 def _check_days(limit: int | None) -> Check:
+    """界面说「会不会到期」，报告留具体天数。
+
+    使用者不关心上限是多少天，只关心「会不会到期」。上万天这个数字摆在界面上
+    只会让人多想，所以只在 detail 里留如实数值。
+    """
     if limit is None:
         return Check(
-            "days", "试用上限", STATUS_INFO,
-            fact="上限未知",
-            meaning=f"未激活时官方默认是 {C.ORIGINAL_DAYS} 天",
+            "days", "使用期限", STATUS_INFO,
+            fact="暂时无法确认",
+            detail=f"未激活时官方默认是 {C.ORIGINAL_DAYS} 天",
         )
     if limit <= C.ORIGINAL_DAYS:
         return Check(
-            "days", "试用上限", STATUS_FAIL,
-            fact=f"{limit} 天（官方默认就是 {C.ORIGINAL_DAYS} 天）",
-            meaning="上限没有被真正改写，效果等同于仍在试用",
-            action="点击「激活」",
+            "days", "使用期限", STATUS_FAIL,
+            fact="仍在试用期　会到期",
+            meaning="期限没有被真正改写，效果等同于还在试用",
+            action="点「激活」",
+            detail=f"读取到的上限是 {limit} 天，官方默认就是 {C.ORIGINAL_DAYS} 天",
         )
     return Check(
-        "days", "试用上限", STATUS_OK,
-        fact=f"{limit} 天",
+        "days", "使用期限", STATUS_OK,
+        fact="不会到期",
         meaning="远高于官方默认值，不存在到期问题",
+        detail=f"试用上限 = {limit} 天",
     )
 
 
@@ -599,8 +606,9 @@ def _check_extensions(exts: list[runtime.BrowserExt]) -> Check:
         lines.append("残留：" + "、".join(e.browser for e in leftover))
     return Check(
         "ext", "浏览器扩展", STATUS_OK,
-        fact="已安装：" + "、".join(lines),
-        meaning="扩展已就位",
+        fact="已装好　浏览器下载会交给 IDM",
+        meaning="扩展已就位，浏览器里的下载由 IDM 接管",
+        detail="已安装：" + "、".join(lines),
     )
 
 
