@@ -201,6 +201,50 @@ def cmd_cancel_update(quiet: bool) -> int:
     return 0
 
 
+def cmd_silence_nag(quiet: bool) -> int:
+    """静默催购弹窗：把 nag 生成函数的入口改成直接返回。
+
+    未注册状态下 IDM 每次添加下载都会弹「试用结束，请购买」。它与试用上限
+    是两套独立机制 —— 上限补丁全绿它也照弹，所以单独提供一个动作。
+
+    文件若尚未激活，会一并完成激活 —— 那条路径本来就要改同样的字节，
+    没有理由让使用者分两步走。
+    """
+    exe = runtime.idm_exe()
+    if exe is None:
+        _message("找不到 IDM，无法处理。", error=True)
+        return 2
+
+    ok, err = _stop_running_idm(quiet)
+    if not ok:
+        _message(err, error=True)
+        return 3
+
+    try:
+        # 天数不在这里暴露：本动作的语义是「关掉催购弹窗」，上限沿用文件里
+        # 已有的值，或者用默认值补齐尚未激活的文件。
+        result = patch.apply_patch(
+            exe, C.DEFAULT_DAYS, silence_nag=True)
+    except Exception as exc:
+        _message(f"处理失败：\n\n{exc}", error=True)
+        return 4
+
+    lines = [f"文件：{exe}"]
+    if result.days is not None:
+        lines.append(f"试用上限：{result.days} 天")
+    lines.extend(result.lines)
+
+    if result.nag_silenced:
+        head = "催购弹窗已静默。以后添加下载不会再弹「试用结束」的提示。"
+    else:
+        head = (
+            "未能确认催购弹窗已静默：\n"
+            "IDMan.exe 里找不到可识别的改写点。文件未被改动。"
+        )
+    _message(head + "\n\n" + "\n".join(lines))
+    return 0
+
+
 def cmd_restore(quiet: bool) -> int:
     exe = runtime.idm_exe()
     if exe is None:
@@ -305,6 +349,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--patch", action="store_true", help="把试用上限改成指定天数")
     g.add_argument("--cancel-update", action="store_true",
                    help="取消自动更新（IDM 不再自动检查新版本）")
+    g.add_argument("--silence-nag", action="store_true",
+                   help="静默催购弹窗（添加下载时不再弹「试用结束」提示）")
     g.add_argument("--restore", action="store_true", help="从备份还原为官方原版")
     g.add_argument("--export", action="store_true", help="导出诊断报告到桌面")
     g.add_argument("--check", action="store_true", help="在终端输出诊断报告")
@@ -321,7 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.patch or args.cancel_update:
+    if args.patch or args.cancel_update or args.silence_nag:
         try:
             days = _parse_days(args.days, C.DEFAULT_DAYS)
         except patch.PatchError as exc:
@@ -329,6 +375,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if args.cancel_update:
             return cmd_cancel_update(args.quiet)
+        if args.silence_nag:
+            return cmd_silence_nag(args.quiet)
         return cmd_patch(days, args.quiet)
     if args.restore:
         return cmd_restore(args.quiet)

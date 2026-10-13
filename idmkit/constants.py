@@ -23,7 +23,7 @@ FILE_VERSION = (6, 43, 15, 2)
 FILE_VERSION_TEXT = ".".join(str(n) for n in FILE_VERSION)
 
 #: 工具自己的版本。
-TOOL_VERSION = "0.1.0"
+TOOL_VERSION = "0.1.1"
 
 # ---- 官方安装包 --------------------------------------------------------
 
@@ -195,6 +195,40 @@ PATCH_E_AT = 12                              # 目标 = 锚点位置 + 12
 PATCH_E_OLD = bytes.fromhex("02")            # 分派到 0x487C8B（会去检查更新）
 PATCH_E_NEW = bytes.fromhex("28")            # 分派到空处理 0x488449
 PATCH_E_CODE = 1
+
+# ---- 补丁 F：静默「未注册 / 假序列号」催购弹窗 ---------------------------
+#
+# 现象：补丁 A-E 全部就位后，每次添加下载（浏览器接管或命令行 /d）仍会弹一个
+# 「IDM has not been registered for 30 days. Trial period is over.」的置顶
+# 警告框；纯启动不弹。关掉后下载完全正常。
+#
+# 调查结论（2026-10-13，逆向 + 动态抓栈验证）：这条 nag 与补丁 A/B 改写的
+# 试用上限是**两套独立机制**。生成函数 0x4757D0(type) 在栈上逐字节拼出
+# XOR-0x17 加密的文案（所以全文件搜不到明文），按参数二选一：
+#
+#   type == 9 -> "IDM has not been registered for 30 days. Trial period is over."
+#   其他       -> "Internet Download Manager has been registered with a fake
+#                 Serial Number or the Serial Number has been blocked. ..."
+#
+# 再经封装 0x474EE0（全局开关 byte [0x788C2D] 分派）送进 0x46DCE0，装一个
+# WH_CBT 钩子后 MessageBoxW，样式 0x41030 = MB_ICONEXCLAMATION |
+# MB_SYSTEMMODAL | MB_TOPMOST。全程不读 [0x77BD28] / [0x77BD24] —— 上限改成
+# 多大它都照弹，「上限不可达 = 所有下游判定失效」对这条 nag 不成立。
+#
+# 函数以 cdecl 回调被调度（尾部 0x47626B 是裸 ret），入口即返则栈自平衡；
+# 序言此处尚未分配任何资源，跳过全部逻辑没有清理问题。两条催购文案一并静默。
+# 代价是函数尾部那记 Sleep(250) + PostMessage(WM_COMMAND, 0x149B) 一并跳过，
+# 实测（2026-10-13）手动关掉弹窗走完这条尾巴与直接跳过，下载行为没有差别。
+#
+# 锚点取目标之后 11 字节（push 0x66885B ; mov eax, fs:[0]），不含被改的
+# 1 字节 —— 与站点 A 用前缀、C/D/E 取目标之前是同一条硬规则。目标前的
+# push -1 是 6A FF 两字节中的第一个。
+
+ANCHOR_F = bytes.fromhex("685B886600" + "64A100000000")
+PATCH_F_AT = -2                              # 目标 = 锚点位置 - 2（push -1 的 6A）
+PATCH_F_OLD = bytes.fromhex("6A")            # push -1
+PATCH_F_NEW = bytes.fromhex("C3")            # ret
+PATCH_F_CODE = 1
 
 # ---- 天数 --------------------------------------------------------------
 
