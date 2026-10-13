@@ -409,10 +409,12 @@ class App(tk.Tk):
                 messagebox.showerror("失败", str(exc))
                 return
             if result.changed:
+                detail = "\n".join(f"　{line}" for line in result.lines)
                 messagebox.showinfo(
                     "完成",
                     f"处理完成，无需管理员权限。\n\n"
-                    f"试用上限：{result.days} 天\n文件：{exe}",
+                    f"试用上限：{result.days} 天\n文件：{exe}"
+                    + (f"\n\n{detail}" if detail else ""),
                 )
             else:
                 messagebox.showinfo("无需处理", "当前状态不需要改动。")

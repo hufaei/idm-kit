@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import constants as C
-from . import patch, runtime
+from . import patch, pe, runtime
 
 STATUS_OK = "ok"
 STATUS_WARN = "warn"
@@ -226,6 +226,50 @@ def _check_patch(exe: Path | None, state: patch.PatchState | None) -> Check:
             "通常是 IDM 升级到了更新的构建"
         ),
         action="重装到支持版本，或重新运行官方安装包",
+    )
+
+
+def _check_checksum(exe: Path | None, state: patch.PatchState | None) -> Check:
+    """PE 头里的 CheckSum 是否与文件内容自洽。
+
+    补丁改的是代码段，而 IDM 会用 PE 头的这个字段检查自身完整性：字段与实测值
+    对不上，它就报「IDM 主程序文件已损坏」并冻结正在进行的下载。所以重算校验和
+    不是可有可无的收尾，而是"补丁打完整了没有"的判据本身。
+    """
+    if exe is None or state is None or state.overall != patch.PATCHED:
+        return Check(
+            "checksum", "PE 校验和", STATUS_INFO,
+            fact="未检查",
+            meaning="文件不在已激活状态，无从判断校验和",
+        )
+
+    try:
+        data = exe.read_bytes()
+        at = pe.checksum_field_offset(data)
+        stored = int.from_bytes(data[at:at + 4], "little")
+        want = pe.pe_checksum(data)
+    except Exception as exc:  # 读不到不该中断整个诊断
+        return Check(
+            "checksum", "PE 校验和", STATUS_INFO,
+            fact=f"无法读取：{exc}",
+            meaning="无法判断",
+        )
+
+    if stored == want:
+        return Check(
+            "checksum", "PE 校验和", STATUS_OK,
+            fact=f"0x{want:08X}，与文件内容自洽",
+            meaning="IDM 不会认为程序文件被改坏",
+        )
+
+    return Check(
+        "checksum", "PE 校验和", STATUS_FAIL,
+        fact=f"文件里写的是 0x{stored:08X}，按实际内容算出来应为 0x{want:08X}",
+        meaning=(
+            "补丁改过代码段，但 PE 头里的校验和没跟着更新。"
+            "IDM 会据此报「IDM 主程序文件已损坏」，并冻结正在进行的下载"
+        ),
+        action="点「激活」补齐校验和即可，不会重打补丁",
     )
 
 
@@ -518,6 +562,7 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
         except Exception as exc:  # 读取失败不应中断整个诊断
             ctx["patch_error"] = str(exc)
     checks.append(_check_patch(exe, state))
+    checks.append(_check_checksum(exe, state))
 
     checks.append(_check_days(state.days if state else None))
     checks.append(_check_update())
@@ -608,6 +653,15 @@ def _decide(
             "激活状态异常", STATUS_FAIL,
             by_key["patch"].meaning,
             by_key["patch"].action or "尝试「还原官方版」后再「激活」",
+        )
+
+    # 补丁在位不等于补得完整：校验和没重算的文件会被 IDM 判成损坏，此时
+    # 光看「已激活」会得出错误的「一切正常」。
+    if by_key["checksum"].status == STATUS_FAIL:
+        return (
+            "激活不完整", STATUS_FAIL,
+            by_key["checksum"].meaning,
+            by_key["checksum"].action,
         )
 
     if by_key["patch"].status == STATUS_OK and state and state.note:
