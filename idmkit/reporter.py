@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import constants as C
-from . import diagnose, runtime
+from . import diagnose, journal, runtime
 
 
 def _text(name: str, body: str) -> tuple[str, str]:
@@ -28,7 +28,10 @@ def collect(diag: diagnose.Diagnosis) -> list[tuple[str, str]]:
     parts.append(_text("03-浏览器扩展状态.txt", _extension_report()))
     parts.append(_text("04-安装目录文件.txt", _directory_listing()))
     parts.append(_text("05-IDM安装日志.txt", _setup_log()))
-    parts.append(_text("06-使用说明.txt", _readme_hint()))
+    # 操作记录放在使用说明之前：排障时先看「做过什么、哪次失败了」，
+    # 比先看怎么解读报告更有用。
+    parts.append(_text("06-操作记录.txt", journal.render_text()))
+    parts.append(_text("07-使用说明.txt", _readme_hint()))
     return parts
 
 
@@ -93,10 +96,14 @@ def _readme_hint() -> str:
         "",
         "1. 看 01-诊断结论.txt 开头的「结论 / 原因 / 建议」三行即可定位问题。",
         "2. 「事实」是原始状态，「含义」是它代表什么，不需要另外猜测。",
-        "3. 若结论是「激活已失效」，让用户重新点一次「激活」按钮即可。",
-        "4. 若结论涉及「IDM 权限过高」，让用户不要用管理员身份启动 IDM。",
-        "5. 浏览器扩展：Chrome / Edge 由注册表自动安装；",
+        "3. **先看 06-操作记录.txt**：它记着每次动作的结果与失败原因。",
+        "   如果里面有一条「失败」，那次的摘要就是根因所在 —— 诊断结论只说明",
+        "   「现在是什么状态」，说不出「刚才为什么失败」。",
+        "4. 若结论是「激活已失效」，让用户重新点一次「激活」按钮即可。",
+        "5. 若结论涉及「IDM 权限过高」，让用户不要用管理员身份启动 IDM。",
+        "6. 浏览器扩展：Chrome / Edge 由注册表自动安装；",
         f"   Firefox 需要手动把 {xpi} 拖进浏览器窗口。",
+        "7. 需要更细的数据时看 02-诊断结论.json，字段最全（含各改写点偏移）。",
         "",
         f"IDM 安装目录：{d or '未找到'}",
     ])

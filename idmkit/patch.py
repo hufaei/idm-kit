@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import constants as C
+from . import journal
 from .pe import (
     PatchError,
     Site,
@@ -369,6 +370,63 @@ def apply_patch(
     *,
     cancel_autoupdate: bool = False,
 ) -> PatchResult:
+    """apply_patch 的带记录入口。
+
+    记录放在这一层而不是函数体内部：一来函数体里满是提前 return 和 raise，
+    逐处插入容易漏；二来界面和命令行都调用这一层，两条路都会留痕。
+    """
+    try:
+        result = _apply_patch_impl(
+            exe, days, force=force, cancel_autoupdate=cancel_autoupdate
+        )
+    except PatchError as exc:
+        journal.record(
+            "关闭自动更新" if cancel_autoupdate else "激活",
+            False,
+            str(exc).splitlines()[0],
+            {"file": str(exe)},
+        )
+        raise
+    except Exception as exc:      # 未预期的异常也要留下痕迹
+        journal.record(
+            "关闭自动更新" if cancel_autoupdate else "激活",
+            False,
+            f"未预期的错误：{exc}",
+            {"file": str(exe)},
+        )
+        raise
+
+    journal.record(
+        "关闭自动更新" if cancel_autoupdate else "激活",
+        True,
+        _result_summary(result),
+        {
+            "file": str(exe),
+            "changed": result.changed,
+            "days": result.days,
+            "sha_after": result.sha_after[:16] if result.sha_after else "",
+            "autoupdate_stopped": result.autoupdate_stopped,
+        },
+    )
+    return result
+
+
+def _result_summary(result: PatchResult) -> str:
+    if not result.changed:
+        return "本来就已就位，没有写入"
+    parts = [f"上限 {result.days} 天" if result.days else "已改写"]
+    if result.autoupdate_stopped:
+        parts.append("自动更新已关闭")
+    return "，".join(parts)
+
+
+def _apply_patch_impl(
+    exe: Path,
+    days: int,
+    force: bool = False,
+    *,
+    cancel_autoupdate: bool = False,
+) -> PatchResult:
     """把试用上限改成 days 天；可选地一并取消自动更新。
 
     所有检查都在写入之前完成；任何一项不通过，文件保持原样。
@@ -555,6 +613,33 @@ def apply_patch(
 
 
 def restore(exe: Path) -> PatchResult:
+    """restore 的带记录入口，理由同 apply_patch。"""
+    try:
+        result = _restore_impl(exe)
+    except PatchError as exc:
+        journal.record("还原官方版", False, str(exc).splitlines()[0],
+                       {"file": str(exe)})
+        raise
+    except Exception as exc:
+        journal.record("还原官方版", False, f"未预期的错误：{exc}",
+                       {"file": str(exe)})
+        raise
+
+    journal.record(
+        "还原官方版",
+        True,
+        "已还原" if result.changed else "文件本来就是还原后的样子",
+        {
+            "file": str(exe),
+            "changed": result.changed,
+            "sha_after": result.sha_after[:16] if result.sha_after else "",
+            "warning": result.warning or "",
+        },
+    )
+    return result
+
+
+def _restore_impl(exe: Path) -> PatchResult:
     """从 .bak 还原。"""
     backup_path = exe.with_name(exe.name + C.BACKUP_SUFFIX)
     if not backup_path.is_file():
