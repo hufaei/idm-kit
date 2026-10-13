@@ -451,8 +451,7 @@ def _check_nag(state: patch.PatchState | None) -> Check:
             "nag", "催购弹窗", STATUS_OK,
             fact="已静默　添加下载时不会再弹「试用结束，请购买」",
             meaning="生成弹窗的函数入口已被改成直接返回，两条催购文案一并失效",
-            detail=f"催购弹窗入口 = "
-                   + ("0xC3（直接返回）" if state.site_f else "未知"),
+            detail="催购弹窗入口 = 0xC3（直接返回）",
         )
 
     if state.nag_known:

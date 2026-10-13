@@ -633,7 +633,10 @@ def _apply_patch_impl(
     else:
         lines.append(f"PE 校验和 0x{cs_old:08X} 本来就自洽，无需改动")
 
-    if not pending:
+    # 站点全部就位**且**校验和自洽，才是真正的无事可做。校验和过期时即使
+    # 没有站点要写，也要把重算结果落盘一次 —— 老版本工具只改字节不重算校验
+    # 和，README 向用户承诺过「再点一次激活即可补齐」，兑现的就是这里。
+    if not pending and cs_old == cs_new:
         return PatchResult(
             ok=True, changed=False, days=days,
             sha_before=sha_before, sha_after=sha_before, backup=None,

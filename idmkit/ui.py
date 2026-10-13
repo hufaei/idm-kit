@@ -583,9 +583,6 @@ class App(tk.Tk):
         if exe is None:
             return
 
-        label = {"patch": "激活", "restore": "还原官方版",
-                 "cancel-update": "取消自动更新",
-                 "silence-nag": "静默催购弹窗"}.get(action, action)
         days = C.DEFAULT_DAYS
 
         # 「取消自动更新」「静默催购弹窗」既要能在激活过的文件上补打，也要能
