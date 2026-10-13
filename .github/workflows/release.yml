@@ -1,10 +1,13 @@
 name: 构建并发布
 
 # 打 tag 时自动构建并发布；也可以手动触发，只出产物不发 Release。
+#
+# tag 命名：tool-v0.1.0 这种形式。早先用的是 IDM 的版本号序列
+# （v6.43.15.2），结果分不清涨的是 IDM 的 build 还是工具自己的改动。
 on:
   push:
     tags:
-      - "v*"
+      - "tool-v*"
   workflow_dispatch:
 
 permissions:
@@ -26,8 +29,25 @@ jobs:
       - name: 安装 Nuitka
         run: python -m pip install --upgrade pip nuitka
 
+      # tag 是版本号的唯一来源：从 tag 推导后传给构建脚本，免得 constants
+      # 里的 TOOL_VERSION 和 tag 各说各话。
+      - name: 推导版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          if ($ref -like "tool-v*") {
+            $v = $ref -replace "^tool-v", ""
+          } elseif ($ref -like "v*") {
+            $v = $ref -replace "^v", ""
+          } else {
+            $v = "0.0.0-dev"
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "版本号：$v"
+
       - name: 编译成单文件 exe
-        run: python build-nuitka.py
+        run: python build-nuitka.py --version "${{ steps.ver.outputs.version }}"
 
       - name: 核对产物
         shell: pwsh
@@ -72,9 +92,10 @@ jobs:
       # 官方安装包不放进仓库（.gitignore 已排除 samples/），需要它作为附件时
       # 在下面的步骤里自行提供 —— 仓库里不保存第三方安装程序。
       - name: 生成 Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/tool-v') || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: IDM 工具 v${{ steps.ver.outputs.version }}
           # 手册在本仓库里叫「使用说明.md」，但上传时中文文件名会出问题：
           # gh/action 会把它落成 default.md 甚至丢失。先复制成 ASCII 名再传，
           # 这样每个版本发出来都一定带得上手册。

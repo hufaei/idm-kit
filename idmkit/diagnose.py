@@ -682,6 +682,10 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
 
     # 环境上下文，出问题时便于复现
     ctx.update({
+        # 工具自己的版本：拿到报告时先确认对方用的是哪一版
+        "tool_version": C.TOOL_VERSION,
+        # 本工具能处理的 IDM 版本，与上面的工具版本是两回事
+        "supported_idm": C.FILE_VERSION_TEXT,
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "windows": f"{platform.system()} {platform.release()} ({platform.version()})",
         "python": sys.version.split()[0],

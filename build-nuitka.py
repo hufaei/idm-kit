@@ -11,10 +11,12 @@ Nuitka 编译出来的 exe 不是加密产物 —— 它把 .py 变成 C 再编�
     python build-nuitka.py                 # 单文件，无控制台
     python build-nuitka.py --console       # 保留控制台便于看报错
     python build-nuitka.py --standalone    # 产出文件夹（启动更快）
+    python build-nuitka.py --version 0.1.0 # 指定工具版本（CI 从 tag 推导）
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -30,30 +32,40 @@ APP_NAME = "IDM-Tool"
 
 
 def _file_version() -> str:
-    """从 idmkit.constants 取打包用的版本号。
+    """取打包用的版本号 —— 这里要的是**工具自己的**版本。
 
-    版本信息一旦给了任意一项，Nuitka 就要求连版本号一起给，所以这里必须有个
-    确定的值，而不是省略。constants 里 FILE_VERSION 是元组 (6, 43, 15, 2)，
-    FILE_VERSION_TEXT 才是点分字符串，两种形态都要能吃。
+    注意别拿 IDM 的版本来当工具的版本：constants.FILE_VERSION 是「本工具能
+    处理的 IDMan.exe 版本」，它绑死补丁偏移；tool 自己的版本是 TOOL_VERSION。
+    早先混用，导致 tag 和 exe 属性看着像是 IDM 换了 build。
+
+    版本信息一旦给了任意一项，Nuitka 就要求连版本号一起给，所以必须有个确定
+    的值。CI 传构建参数进来，本地直接编译时回落到 constants。
     """
     sys.path.insert(0, str(ROOT))
     try:
         from idmkit import constants as C
 
-        v = getattr(C, "FILE_VERSION", None)
-        if isinstance(v, (tuple, list)) and v:
-            return ".".join(str(n) for n in v[:4])
-
-        for attr in ("FILE_VERSION_TEXT", "VERSION"):
-            text = getattr(C, attr, None)
-            if text:
-                parts = str(text).replace(",", ".").split(".")
-                nums = [p for p in parts if p.isdigit()][:4]
-                if nums:
-                    return ".".join(nums)
+        text = getattr(C, "TOOL_VERSION", None)
+        if text:
+            return _normalise_version(str(text))
     except Exception:
         pass
-    return "1.0.0.0"
+    return "0.1.0.0"
+
+
+def _normalise_version(text: str) -> str:
+    """Nuitka 的文件版本段必须是纯数字，``0.1.0`` -> ``0.1.0.0``。
+
+    注意先把 tag 前缀去掉：``v0.1.0`` 若直接过滤数字会变成 ``1.0.0.0`` ——
+    v 被当作非数字丢掉，剩下 0.1.0 反而被当成第 1 段，读起来完全不是本意。
+    """
+    parts = str(text).replace(",", ".").split(".")
+    if parts and parts[0].strip().lower().startswith("v"):
+        parts[0] = parts[0].strip()[1:]
+    nums = [p for p in (s.strip() for s in parts) if p.isdigit()][:4]
+    while len(nums) < 4:
+        nums.append("0")
+    return ".".join(nums)
 
 
 FILE_VERSION = _file_version()
@@ -81,6 +93,20 @@ def main() -> int:
             print("--tmpdir 后面要跟一个路径（可含 Nuitka 占位符）。")
             return 1
         args_tmpdir = sys.argv[i + 1]
+
+    # 版本号可以覆盖：CI 从 tag 推导后传进来，让 tag 成为唯一来源，
+    # 免得 constants 里的 TOOL_VERSION 和 tag 各说各话。
+    override = os.environ.get("IDM_TOOL_VERSION", "").strip()
+    if "--version" in sys.argv:
+        i = sys.argv.index("--version")
+        if i + 1 >= len(sys.argv):
+            print("--version 后面要跟一个版本号，例如 0.1.0。")
+            return 1
+        override = sys.argv[i + 1].strip().lstrip("v")
+    if override:
+        global FILE_VERSION
+        FILE_VERSION = _normalise_version(override)
+        print(f"版本号由外部指定：{FILE_VERSION}")
 
     if not ENTRY.is_file():
         print(f"找不到入口文件：{ENTRY}")

@@ -129,7 +129,10 @@ class App(tk.Tk):
         # 权限状态直接写进标题。普通权限下进程表可能是残缺的（实测只扫到
         # 23 个进程），关闭 IDM 这类操作用管理员身份运行才不会遇到怪现象。
         self.elevated = runtime.is_elevated()
-        self.title("IDM 工具（管理员）" if self.elevated else "IDM 工具（普通权限）")
+        self.title(
+            f"IDM 工具 v{C.TOOL_VERSION}"
+            + ("（管理员）" if self.elevated else "（普通权限）")
+        )
         self.configure(bg=BG)
         self.geometry("780x660")
         self.minsize(700, 560)
@@ -194,8 +197,8 @@ class App(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
 
         tk.Label(
-            head, text=f"支持版本 {C.FILE_VERSION_TEXT}", bg=BG, fg=MUTED,
-            font=("Segoe UI", 9),
+            head, text=f"版本 {C.TOOL_VERSION}　·　支持 IDM {C.FILE_VERSION_TEXT}",
+            bg=BG, fg=MUTED, font=("Segoe UI", 9),
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         self.btn_refresh = tk.Button(
