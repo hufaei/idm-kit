@@ -47,6 +47,19 @@ jobs:
           Write-Host "SHA256：$hash"
           "SHA256 = $hash" | Out-File -FilePath dist-nuitka/SHA256.txt -Encoding utf8
 
+      # 手册在本仓库里叫「使用说明.md」。中文文件名上传到 release 会出问题：
+      # 实测会被落成 default.md 或直接丢失，附件里找不到手册。先复制成 ASCII
+      # 名，后面的步骤一律引用这个副本。
+      - name: 把手册复制成 ASCII 文件名
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath "使用说明.md" -Destination "dist-nuitka/USAGE.md" -Force
+          if (-not (Test-Path "dist-nuitka/USAGE.md")) {
+            Write-Error "手册复制失败"
+            exit 1
+          }
+          Write-Host ("手册已就绪，{0:N0} 字节" -f (Get-Item "dist-nuitka/USAGE.md").Length)
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
@@ -54,7 +67,7 @@ jobs:
           path: |
             dist-nuitka/IDM-Tool.exe
             dist-nuitka/SHA256.txt
-            使用说明.md
+            dist-nuitka/USAGE.md
 
       # 官方安装包不放进仓库（.gitignore 已排除 samples/），需要它作为附件时
       # 在下面的步骤里自行提供 —— 仓库里不保存第三方安装程序。
@@ -62,9 +75,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          # 手册在本仓库里叫「使用说明.md」，但上传时中文文件名会出问题：
+          # gh/action 会把它落成 default.md 甚至丢失。先复制成 ASCII 名再传，
+          # 这样每个版本发出来都一定带得上手册。
           files: |
             dist-nuitka/IDM-Tool.exe
-            使用说明.md
+            dist-nuitka/USAGE.md
             README.md
           generate_release_notes: true
           body: |
