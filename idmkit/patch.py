@@ -34,6 +34,7 @@ UNRECOGNISED = "unrecognised"
 PATCHED = "patched"
 PRISTINE = "pristine"
 INCONSISTENT = "inconsistent"
+PARTIAL = "partial"
 UNKNOWN = "unknown"
 
 
@@ -48,11 +49,18 @@ def make_b_bytes(days: int) -> bytes:
 
 
 def build_sites(days: int) -> list[Site]:
-    """构造两个改写站点。"""
+    """构造三个改写站点。
+
+    C 与 days 无关，但它不是可选项：改了字节就会触发 IDM 的完整性警告并冻结
+    下载，所以它必须和 A、B 一起落地，否则打出来的文件没法正常用。
+    """
     return [
         Site(
             name="补丁 A（上限计算）",
-            anchor=C.ANCHOR_A,
+            # 用前缀而不是完整锚点：完整锚点里含着要被改写的那 6 字节，打完之后
+            # 它就消失了，续打时无法定位。前缀不含被改部分，打完依然在，靠
+            # verify_old 比对中间那 6 字节来判断是否已经改过。
+            anchor=C.PREFIX_A,
             delta=C.PATCH_A_AT,
             old=C.PATCH_A_OLD,
             new=make_a_bytes(days),
@@ -63,6 +71,13 @@ def build_sites(days: int) -> list[Site]:
             delta=C.ANCHOR_B_DELTA,
             old=C.PATCH_B_OLD,
             new=make_b_bytes(days),
+        ),
+        Site(
+            name="补丁 C（跳过完整性警告）",
+            anchor=C.ANCHOR_C,
+            delta=C.PATCH_C_AT,
+            old=C.PATCH_C_OLD,
+            new=C.PATCH_C_NEW,
         ),
     ]
 
@@ -84,6 +99,7 @@ class PatchState:
     days: int | None
     site_a: SiteState
     site_b: SiteState
+    site_c: SiteState
     note: str = ""
 
     @property
@@ -137,12 +153,33 @@ def _inspect_site_b(data: bytes, a: SiteState) -> SiteState:
     return SiteState(UNRECOGNISED, days=days_b, offset=at)
 
 
+def _inspect_site_c(data: bytes) -> SiteState:
+    """读取完整性警告判断点上的跳转形式。"""
+    hits = find_all(data, C.ANCHOR_C)
+    if not hits:
+        return SiteState(MISSING)
+    if len(hits) > 1:
+        return SiteState(AMBIGUOUS, hits=len(hits))
+
+    at = hits[0] + C.PATCH_C_AT
+    if at + C.PATCH_C_CODE > len(data):
+        return SiteState(UNRECOGNISED, offset=at)
+
+    cur = data[at:at + C.PATCH_C_CODE]
+    if cur == C.PATCH_C_OLD:
+        return SiteState(NOT_APPLIED, offset=at)
+    if cur == C.PATCH_C_NEW:
+        return SiteState(APPLIED, offset=at)
+    return SiteState(UNRECOGNISED, offset=at)
+
+
 def inspect(data: bytes) -> PatchState:
     """判定补丁状态。只读，不修改传入的数据。"""
     a = _inspect_site_a(data)
     b = _inspect_site_b(data, a)
+    c = _inspect_site_c(data)
 
-    if a.state == APPLIED and b.state == APPLIED:
+    if a.state == APPLIED and b.state == APPLIED and c.state == APPLIED:
         if a.days == b.days:
             note = ""
             if a.days is not None and a.days <= C.ORIGINAL_DAYS:
@@ -150,20 +187,30 @@ def inspect(data: bytes) -> PatchState:
                     f"当前上限 {a.days} 天不高于官方默认的 {C.ORIGINAL_DAYS} 天，"
                     "这次修改没有任何效果。"
                 )
-            return PatchState(PATCHED, a.days, a, b, note)
+            return PatchState(PATCHED, a.days, a, b, c, note)
         return PatchState(
-            INCONSISTENT, None, a, b,
+            INCONSISTENT, None, a, b, c,
             f"两处数值不一致（代码 {a.days} / 数据 {b.days}）。",
         )
 
-    if a.state == NOT_APPLIED and b.state == NOT_APPLIED:
-        return PatchState(PRISTINE, None, a, b)
+    if (a.state == NOT_APPLIED and b.state == NOT_APPLIED
+            and c.state == NOT_APPLIED):
+        return PatchState(PRISTINE, None, a, b, c)
+
+    # A、B 已就位而 C 未打：这是本工具早期版本的产物。不是错误，但警告框会
+    # 一直弹、下载一直被冻结，必须显式提示用户补一次。
+    if a.state == APPLIED and b.state == APPLIED and c.state == NOT_APPLIED:
+        return PatchState(
+            PARTIAL, a.days, a, b, c,
+            "试用上限已改，但完整性警告还没跳过 —— 下载时仍会弹出"
+            "「IDM 主程序文件已损坏」并冻结下载。再执行一次即可补齐。",
+        )
 
     detail = "、".join(
         f"{name}={st.state}"
-        for name, st in (("代码", a), ("数据", b))
+        for name, st in (("代码", a), ("数据", b), ("警告", c))
     )
-    return PatchState(UNKNOWN, None, a, b, f"状态无法判定（{detail}）。")
+    return PatchState(UNKNOWN, None, a, b, c, f"状态无法判定（{detail}）。")
 
 
 def sha256_of(data: bytes) -> str:
@@ -241,7 +288,15 @@ def apply_patch(exe: Path, days: int, force: bool = False) -> PatchResult:
         )
 
     # 白名单：只接受未被改动的官方文件。
-    if not is_pristine(sha_before) and not force:
+    #
+    # 例外：A、B 已就位而 C 未打 —— 这是本工具早期版本处理过的文件，也正好是
+    # 老用户升级工具后会遇到的情形。这种文件放行，只补缺的那一处。
+    resumable = (
+        state.site_a.state == APPLIED
+        and state.site_b.state == APPLIED
+        and state.site_c.state == NOT_APPLIED
+    )
+    if not is_pristine(sha_before) and not force and not resumable:
         raise PatchError(
             "这个文件不是已知的官方版本，拒绝写入。\n"
             f"  实际 sha256 = {sha_before}\n"
@@ -249,11 +304,28 @@ def apply_patch(exe: Path, days: int, force: bool = False) -> PatchResult:
             "如果确认要处理，请显式选择「强制」。"
         )
 
-    sites = build_sites(days)
-    for site in sites:
+    # 续打时沿用文件里已有的天数：用户这次填的值可能与当初不同，以文件为准
+    # 才不会让两处数值打架。
+    if resumable:
+        if state.days is None:
+            raise PatchError("文件里的天数读不出来，无法安全续打。")
+        days = state.days
+
+    pending: list[Site] = []
+    for site in build_sites(days):
+        at = site.locate(data)
+        if data[at:at + site.length] == site.new:
+            lines.append(f"{site.name}：已是目标状态，跳过")
+            continue
         site.verify_old(data)
-        lines.append(
-            f"{site.name}：锚点唯一，将改写 0x{site.locate(data):X}"
+        lines.append(f"{site.name}：锚点唯一，将改写 0x{at:X}")
+        pending.append(site)
+
+    if not pending:
+        return PatchResult(
+            ok=True, changed=False, days=days,
+            sha_before=sha_before, sha_after=sha_before, backup=None,
+            lines=lines + ["三处补丁均已就位，无写入。"],
         )
 
     # 备份只在首次生成，保留最原始的那一份。
@@ -265,7 +337,7 @@ def apply_patch(exe: Path, days: int, force: bool = False) -> PatchResult:
         lines.append(f"已备份原始文件到 {backup_path.name}")
 
     buf = bytearray(data)
-    for site in sites:
+    for site in pending:
         at = site.locate(bytes(buf))
         buf[at:at + site.length] = site.new
 

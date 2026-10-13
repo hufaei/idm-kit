@@ -186,8 +186,22 @@ def _check_patch(exe: Path | None, state: patch.PatchState | None) -> Check:
         note = f"　{state.note}" if state.note else ""
         return Check(
             "patch", "激活状态", STATUS_OK,
-            fact=f"已激活，上限 {state.days} 天{note}",
-            meaning="试用期上限已被改写，不会到期",
+            fact=f"已激活，上限 {state.days} 天，完整性警告已跳过{note}",
+            meaning=(
+                "试用期上限已被改写，不会到期；"
+                "下载时不会再弹出「IDM 主程序文件已损坏」"
+            ),
+        )
+
+    if state.overall == patch.PARTIAL:
+        return Check(
+            "patch", "激活状态", STATUS_FAIL,
+            fact=state.note or "试用上限已改，完整定性警告未跳过",
+            meaning=(
+                "上限改好了，但 IDM 仍会弹出「IDM 主程序文件已损坏」"
+                "并冻结正在进行的下载"
+            ),
+            action="点击「激活」补齐缺的那一处（几秒钟）",
         )
 
     if state.overall == patch.PRISTINE:
@@ -596,6 +610,7 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
         ctx["site_a_days"] = state.site_a.days
         ctx["site_b"] = state.site_b.state
         ctx["site_b_days"] = state.site_b.days
+        ctx["site_c"] = state.site_c.state
     ctx["registry"] = runtime.registry_snapshot()
     ctx["extension_registry"] = runtime.extension_registry()
 
@@ -630,6 +645,14 @@ def _decide(
         )
 
     if by_key["patch"].status == STATUS_FAIL:
+        if state is not None and state.overall == patch.PARTIAL:
+            # 上限改好了，但完整性警告没跳过。这不是"异常"，而是本工具早期
+            # 版本留下的半成品，用户升级后就会遇到，说法要明确指路。
+            return (
+                "激活不完整", STATUS_FAIL,
+                state.note or "试用上限已改，但完整性警告还没跳过",
+                "点击「激活」补齐缺的那一处，几秒钟即可完成",
+            )
         if state is not None and state.overall == patch.PRISTINE:
             # 文件是官方原版，但「为什么是原版」有两种情况，说法不能混：有 .bak
             # 说明处理过、后来被覆盖；没有 .bak 多半是头一次用 —— 对首次使用者讲
@@ -716,7 +739,8 @@ def _decide(
 
     return (
         "一切正常", STATUS_OK,
-        f"IDM 已激活，试用上限 {by_key['days'].fact}",
+        f"IDM 已激活，试用上限 {by_key['days'].fact}，"
+        "完整性警告已跳过",
         "",
     )
 
