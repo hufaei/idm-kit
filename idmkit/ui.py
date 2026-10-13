@@ -332,7 +332,11 @@ class App(tk.Tk):
         # 判据以进程枚举为主，端口不能当作 IDM 在运行的证据 —— 1001 由
         # IDMWFP 驱动常驻占用，驱动在就一直在监听。详见 runtime.idm_running()。
         running = runtime.idm_running()[0]
-        self.btn_start.configure(state="disabled" if running is True else "normal")
+        # 「启动 IDM」的语义是「确保它以普通权限运行」，所以 IDM 正在跑时也得
+        # 可点：权限不对就引导关掉重开，权限正常则只做一次状态确认（见 do_start）。
+        # 早先它在 running is True 时是禁用的，恰好把最需要修的那个状态挡在门外 ——
+        # IDM 以管理员权限运行时按钮是灰的，用户根本点不到。
+        self.btn_start.configure(state=state)
         self.btn_stop.configure(state="normal" if running is True else "disabled")
 
     # ---- 动作 ----------------------------------------------------------

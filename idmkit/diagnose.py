@@ -577,6 +577,19 @@ def _decide(
 
     if by_key["patch"].status == STATUS_FAIL:
         if state is not None and state.overall == patch.PRISTINE:
+            # 文件是官方原版，但「为什么是原版」有两种情况，说法不能混：有 .bak
+            # 说明处理过、后来被覆盖；没有 .bak 多半是头一次用 —— 对首次使用者讲
+            # 「被还原成了官方原版」是错的，它本来就是原版。
+            backed_up = (
+                exe is not None
+                and exe.with_name(exe.name + C.BACKUP_SUFFIX).is_file()
+            )
+            if not backed_up:
+                return (
+                    "还没处理过", STATUS_FAIL,
+                    "程序文件是官方原版，还没有处理过",
+                    "点击「激活」，几秒钟即可完成",
+                )
             return (
                 "激活已失效", STATUS_FAIL,
                 "程序文件被还原成了官方原版，最常见的原因是 IDM 自动更新覆盖了它",
