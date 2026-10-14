@@ -22,7 +22,12 @@ from __future__ import annotations
 FILE_VERSION = (6, 43, 15, 2)
 FILE_VERSION_TEXT = ".".join(str(n) for n in FILE_VERSION)
 
-#: 工具自己的版本。
+#: 工具自己的版本。发布时用它打 tag（形如 ``tool-v0.1.1``）、写进 exe 的
+#: 文件属性，并显示在界面上。
+#:
+#: 这里是**本地构建的默认值**。正式发布由 CI 从 tag 推导，经
+#: ``build-nuitka.py --version`` 覆盖 —— tag 才是唯一来源，两者不一致时以
+#: tag 为准。仍要记得同步，别让数字互相矛盾。
 TOOL_VERSION = "0.1.1"
 
 # ---- 官方安装包 --------------------------------------------------------

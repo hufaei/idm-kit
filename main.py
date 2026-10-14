@@ -237,10 +237,22 @@ def cmd_silence_nag(quiet: bool) -> int:
     if result.nag_silenced:
         head = "催购弹窗已静默。以后添加下载不会再弹「试用结束」的提示。"
     else:
-        head = (
-            "未能确认催购弹窗已静默：\n"
-            "IDMan.exe 里找不到可识别的改写点。文件未被改动。"
-        )
+        # 按实际字节状态说实话：只说「文件未被改动」在两个改写点都找不到时
+        # 才对；已经改成一个的场合文件其实变了，而且那种情况再点一次能补齐。
+        state = patch.inspect(exe.read_bytes())
+        sites = (state.site_f, state.site_f2)
+        done = sum(1 for s in sites if s is not None and s.state == patch.APPLIED)
+        if done:
+            head = (
+                f"催购弹窗有 {done}/{len(sites)} 处改写点已改好 —— 文件已经变了，\n"
+                "但没能全部就位，弹窗可能照旧会弹。\n"
+                "关闭 IDM 后再执行一次，通常就能补齐。"
+            )
+        else:
+            head = (
+                "未能确认催购弹窗已静默：\n"
+                "IDMan.exe 里找不到可识别的改写点。文件未被改动。"
+            )
     _message(head + "\n\n" + "\n".join(lines))
     return 0
 

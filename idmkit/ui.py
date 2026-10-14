@@ -87,14 +87,45 @@ def _friendly_result(action: str, result) -> str:
             return ("以后添加下载不会再弹「试用结束，请购买」的提示了。\n\n"
                     "它本来就不影响下载，只是催购；关掉图个清净。\n"
                     "想核对改动细节，点「导出诊断」。")
-        return ("处理已完成。\n\n"
-                "但催购弹窗的改写点没能确认，可能还会弹。\n"
-                "建议点「导出诊断」把结果发出来。")
+        return _nag_partial_text(result)
 
     # 「激活」
     return (f"IDM 已激活，可以正常下载。\n\n"
             f"不会再出现试用到期（上限 {days} 天）。\n"
             f"下载时如果弹过「主程序文件已损坏」，也不会再弹。")
+
+
+def _nag_partial_text(result: patch.PatchResult) -> str:
+    """催购弹窗没完全静默时，按**实际字节状态**说实话。
+
+    这里原先一律写「文件未被改动」，但那只在「两个改写点都定位不到」时成立。
+    如果已经改成了一个、另一个没成，文件其实变了 —— 说没改动会把人引偏，
+    还会让他以为重试没用。而这种情况恰恰是能靠再点一次补上的。
+    """
+    done, total = _nag_progress(result)
+    if done:
+        return (f"催购弹窗有 {done} 处改写点已经改好（共 {total} 处），"
+                "文件已经变了。\n\n"
+                "但还有改写点没能确认，弹窗可能照旧会弹。\n"
+                "把 IDM 关掉后再点一次「静默催购弹窗」，通常就能补齐。")
+    return ("催购弹窗的改写点一处都没能找到，文件没有被改动。\n\n"
+            "这个 IDM 版本可能不是工具支持的那个。\n"
+            "建议点「导出诊断」把结果发出来。")
+
+
+def _nag_progress(result: patch.PatchResult) -> tuple[int, int]:
+    """催购弹窗两个改写点里，已经就位了几个。拿不到状态时返回 (0, 0)。"""
+    exe = result.backup
+    if exe is None:
+        return (0, 0)
+    target = exe.with_name(exe.name[: -len(C.BACKUP_SUFFIX)])
+    try:
+        state = patch.inspect(target.read_bytes())
+    except OSError:
+        return (0, 0)
+    sites = (state.site_f, state.site_f2)
+    done = sum(1 for s in sites if s is not None and s.state == patch.APPLIED)
+    return (done, len(sites))
 
 
 def _done_text(action: str) -> str:
@@ -641,10 +672,8 @@ class App(tk.Tk):
             elif action == "silence-nag" and not result.nag_silenced:
                 detail = "\n".join(f"　{line}" for line in result.lines)
                 messagebox.showwarning(
-                    "没能静默",
-                    "处理已完成，但催购弹窗的改写点没能确认，可能还会弹。\n"
-                    "建议点「导出诊断」把结果发出来。\n\n"
-                    f"技术细节：\n{detail}",
+                    "没能完全静默",
+                    _nag_partial_text(result) + f"\n\n技术细节：\n{detail}",
                 )
             else:
                 title = _title_for(action, done=True)
