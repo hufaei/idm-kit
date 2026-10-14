@@ -49,7 +49,11 @@ def make_b_bytes(days: int) -> bytes:
     return days.to_bytes(4, "little")
 
 
-def build_sites(days: int, include_autoupdate: bool = False) -> list[Site]:
+def build_sites(
+    days: int,
+    include_autoupdate: bool = False,
+    silence_nag: bool = False,
+) -> list[Site]:
     """构造改写站点。
 
     A、B、C 是一组，必须一起落地：改了字节就会触发 IDM 的完整性警告并冻结
@@ -58,8 +62,12 @@ def build_sites(days: int, include_autoupdate: bool = False) -> list[Site]:
     D（取消自动更新）单独一组。它不影响激活，也不改变任何界面行为，是否要
     关掉自动更新由使用者决定，所以默认不打 —— 只有显式要求时才构造。
 
+    F（静默催购弹窗）与 D 同理：未注册状态下每次添加下载都会弹催购框，关不
+    关由使用者决定。它的锚点独立，已激活的文件上也能单独补打。
+
     ``include_autoupdate=True`` 时即使文件已打过 A、B、C 也没关系：D 有独立
     锚点，写完之后 A、B、C 的锚点依然完好，三个站点各自判定、只写没就位的那几处。
+    F 同理。
     """
     sites = [
         Site(
@@ -106,6 +114,27 @@ def build_sites(days: int, include_autoupdate: bool = False) -> list[Site]:
                 new=C.PATCH_E_NEW,
             )
         )
+    if silence_nag:
+        # 两个分派器是同一个调度开关里的兄弟 case，只杀一个另一个照弹
+        # （2026-10-14 实测踩过），必须成对落地。
+        sites.append(
+            Site(
+                name="补丁 F1（静默催购弹窗·分派一）",
+                anchor=C.ANCHOR_F,
+                delta=C.PATCH_F_AT,
+                old=C.PATCH_F_OLD,
+                new=C.PATCH_F_NEW,
+            )
+        )
+        sites.append(
+            Site(
+                name="补丁 F2（静默催购弹窗·分派二）",
+                anchor=C.ANCHOR_F2,
+                delta=C.PATCH_F2_AT,
+                old=C.PATCH_F2_OLD,
+                new=C.PATCH_F2_NEW,
+            )
+        )
     return sites
 
 
@@ -129,6 +158,8 @@ class PatchState:
     site_c: SiteState
     site_d: SiteState | None = None
     site_e: SiteState | None = None
+    site_f: SiteState | None = None
+    site_f2: SiteState | None = None
     note: str = ""
     #: 自动更新两个站点的状态说明。
     #: 必须与 note 分开：note 的语义是「这次上限改动有没有实际意义」，
@@ -160,6 +191,21 @@ class PatchState:
         return all(
             s is not None and s.state in (APPLIED, NOT_APPLIED)
             for s in (self.site_d, self.site_e)
+        )
+
+    @property
+    def nag_silenced(self) -> bool:
+        """催购弹窗是否已被静默（两个分派器入口都就位）。"""
+        return all(
+            s is not None and s.state == APPLIED for s in (self.site_f, self.site_f2)
+        )
+
+    @property
+    def nag_known(self) -> bool:
+        """补丁 F 站点是否可判定。旧文件或被换过的文件可能找不到它们。"""
+        return all(
+            s is not None and s.state in (APPLIED, NOT_APPLIED)
+            for s in (self.site_f, self.site_f2)
         )
 
 
@@ -277,6 +323,45 @@ def _inspect_site_c(data: bytes) -> SiteState:
     return SiteState(UNRECOGNISED, offset=at)
 
 
+def _inspect_site_f(data: bytes) -> SiteState:
+    """读取第一个催购分派器（0x4757D0）的入口字节。
+
+    锚点在目标之后 2 字节起（push 0x66885B ; mov eax, fs:[0]），不含被改的
+    那个 0x6A，补丁落地后锚点依然命中 —— 与站点 C/D/E 取目标之前的理由相同：
+    锚点永远不能包含被自己改写的字节。目标在其前面，所以 delta 是负数。
+    """
+    return _inspect_entry_site(data, C.ANCHOR_F, C.PATCH_F_AT,
+                               C.PATCH_F_OLD, C.PATCH_F_NEW)
+
+
+def _inspect_site_f2(data: bytes) -> SiteState:
+    """读取第二个催购分派器（0x47C880）的入口字节，锚点规则同上。"""
+    return _inspect_entry_site(data, C.ANCHOR_F2, C.PATCH_F2_AT,
+                               C.PATCH_F2_OLD, C.PATCH_F2_NEW)
+
+
+def _inspect_entry_site(
+    data: bytes, anchor: bytes, delta: int, old: bytes, new: bytes
+) -> SiteState:
+    """按「锚点 + 负偏移」读一个函数入口字节型站点。"""
+    hits = find_all(data, anchor)
+    if not hits:
+        return SiteState(MISSING)
+    if len(hits) > 1:
+        return SiteState(AMBIGUOUS, hits=len(hits))
+
+    at = hits[0] + delta
+    if at < 0 or at + len(old) > len(data):
+        return SiteState(UNRECOGNISED, offset=at)
+
+    cur = data[at:at + len(old)]
+    if cur == old:
+        return SiteState(NOT_APPLIED, offset=at)
+    if cur == new:
+        return SiteState(APPLIED, offset=at)
+    return SiteState(UNRECOGNISED, offset=at)
+
+
 def inspect(data: bytes) -> PatchState:
     """判定补丁状态。只读，不修改传入的数据。"""
     a = _inspect_site_a(data)
@@ -284,6 +369,8 @@ def inspect(data: bytes) -> PatchState:
     c = _inspect_site_c(data)
     d = _inspect_site_d(data)
     e = _inspect_site_e(data)
+    f = _inspect_site_f(data)
+    f2 = _inspect_site_f2(data)
 
     # 自动更新的说明要按 D、E 两个站点各自的状态说，不能只看一个 —— 只打了 D
     # 而没打 E 的时候，更新其实照样会发生（实测）。
@@ -306,21 +393,21 @@ def inspect(data: bytes) -> PatchState:
                     f"当前上限 {a.days} 天不高于官方默认的 {C.ORIGINAL_DAYS} 天，"
                     "这次修改没有任何效果。"
                 )
-            return PatchState(PATCHED, a.days, a, b, c, d, e, note, auto_note)
+            return PatchState(PATCHED, a.days, a, b, c, d, e, f, f2, note, auto_note)
         return PatchState(
-            INCONSISTENT, None, a, b, c, d, e,
+            INCONSISTENT, None, a, b, c, d, e, f, f2,
             f"两处数值不一致（代码 {a.days} / 数据 {b.days}）。", auto_note,
         )
 
     if (a.state == NOT_APPLIED and b.state == NOT_APPLIED
             and c.state == NOT_APPLIED):
-        return PatchState(PRISTINE, None, a, b, c, d, e, "", auto_note)
+        return PatchState(PRISTINE, None, a, b, c, d, e, f, f2, "", auto_note)
 
     # A、B 已就位而 C 未打：这是本工具早期版本的产物。不是错误，但警告框会
     # 一直弹、下载一直被冻结，必须显式提示用户补一次。
     if a.state == APPLIED and b.state == APPLIED and c.state == NOT_APPLIED:
         return PatchState(
-            PARTIAL, a.days, a, b, c, d, e,
+            PARTIAL, a.days, a, b, c, d, e, f, f2,
             "试用上限已改，但完整性警告还没跳过 —— 下载时仍会弹出"
             "「IDM 主程序文件已损坏」并冻结下载。再执行一次即可补齐。",
             auto_note,
@@ -329,9 +416,9 @@ def inspect(data: bytes) -> PatchState:
     detail = "、".join(
         f"{name}={st.state}"
         for name, st in (("代码", a), ("数据", b), ("警告", c),
-                         ("判据", d), ("定时器", e))
+                         ("判据", d), ("定时器", e), ("催购一", f), ("催购二", f2))
     )
-    return PatchState(UNKNOWN, None, a, b, c, d, e,
+    return PatchState(UNKNOWN, None, a, b, c, d, e, f, f2,
                       f"状态无法判定（{detail}）。", auto_note)
 
 
@@ -354,6 +441,8 @@ class PatchResult:
     warning: str = ""
     #: 写入后自动更新是否处于「已取消」状态。None 表示无法确认。
     autoupdate_stopped: bool | None = None
+    #: 写入后催购弹窗是否处于「已静默」状态。None 表示无法确认。
+    nag_silenced: bool | None = None
 
 
 # ---- 执行 --------------------------------------------------------------
@@ -369,19 +458,27 @@ def apply_patch(
     force: bool = False,
     *,
     cancel_autoupdate: bool = False,
+    silence_nag: bool = False,
 ) -> PatchResult:
     """apply_patch 的带记录入口。
 
     记录放在这一层而不是函数体内部：一来函数体里满是提前 return 和 raise，
     逐处插入容易漏；二来界面和命令行都调用这一层，两条路都会留痕。
     """
+    if cancel_autoupdate:
+        action = "关闭自动更新"
+    elif silence_nag:
+        action = "静默催购弹窗"
+    else:
+        action = "激活"
     try:
         result = _apply_patch_impl(
-            exe, days, force=force, cancel_autoupdate=cancel_autoupdate
+            exe, days, force=force,
+            cancel_autoupdate=cancel_autoupdate, silence_nag=silence_nag,
         )
     except PatchError as exc:
         journal.record(
-            "关闭自动更新" if cancel_autoupdate else "激活",
+            action,
             False,
             str(exc).splitlines()[0],
             {"file": str(exe)},
@@ -389,7 +486,7 @@ def apply_patch(
         raise
     except Exception as exc:      # 未预期的异常也要留下痕迹
         journal.record(
-            "关闭自动更新" if cancel_autoupdate else "激活",
+            action,
             False,
             f"未预期的错误：{exc}",
             {"file": str(exe)},
@@ -397,7 +494,7 @@ def apply_patch(
         raise
 
     journal.record(
-        "关闭自动更新" if cancel_autoupdate else "激活",
+        action,
         True,
         _result_summary(result),
         {
@@ -406,6 +503,7 @@ def apply_patch(
             "days": result.days,
             "sha_after": result.sha_after[:16] if result.sha_after else "",
             "autoupdate_stopped": result.autoupdate_stopped,
+            "nag_silenced": result.nag_silenced,
         },
     )
     return result
@@ -417,6 +515,8 @@ def _result_summary(result: PatchResult) -> str:
     parts = [f"上限 {result.days} 天" if result.days else "已改写"]
     if result.autoupdate_stopped:
         parts.append("自动更新已关闭")
+    if result.nag_silenced:
+        parts.append("催购弹窗已静默")
     return "，".join(parts)
 
 
@@ -426,13 +526,15 @@ def _apply_patch_impl(
     force: bool = False,
     *,
     cancel_autoupdate: bool = False,
+    silence_nag: bool = False,
 ) -> PatchResult:
-    """把试用上限改成 days 天；可选地一并取消自动更新。
+    """把试用上限改成 days 天；可选地一并取消自动更新、静默催购弹窗。
 
     所有检查都在写入之前完成；任何一项不通过，文件保持原样。
 
     ``cancel_autoupdate=True`` 时额外改写自动更新的周期判定（补丁 D）。它与
     上限互不影响：已经激活过的文件上也能单独补打，因为 D 的锚点是独立的。
+    ``silence_nag=True`` 时额外静默催购弹窗（补丁 F），同理可单独补打。
     """
     if not (1 <= days <= 0xFFFFFFFF):
         raise PatchError(f"天数 {days} 必须是 1 到 4294967295 之间的整数。")
@@ -452,20 +554,16 @@ def _apply_patch_impl(
         #
         # 这里也是补打自动更新补丁的入口：文件早已激活过（A、B、C 就位）而要求
         # 取消自动更新的情形，走的正是这条路径 —— 它的哈希是补丁后的，不可能
-        # 等于官方原始哈希，下面的白名单必然拦下它。
-        if cancel_autoupdate:
-            # 只要有一个自动更新站点还处于「没打」，就继续写；全都打完了才算
-            # 没事可做。判据是按站点实际字节读出来的，不依赖任何记号。
-            want_d = True
-        else:
-            want_d = False
+        # 等于官方原始哈希，下面的白名单必然拦下它。静默催购弹窗同理。
+        want_d = bool(cancel_autoupdate)
+        want_f = bool(silence_nag)
 
         cs_at = checksum_field_offset(data)
         cs_stored = int.from_bytes(data[cs_at:cs_at + 4], "little")
         cs_want = pe_checksum(data)
         checksum_ok = cs_stored == cs_want
 
-        if checksum_ok and not want_d:
+        if checksum_ok and not want_d and not want_f:
             note = ""
             if state.autoupdate_stopped:
                 note = "，自动更新已取消"
@@ -478,14 +576,18 @@ def _apply_patch_impl(
                     f"当前上限已经是 {state.days} 天，PE 校验和自洽{note}，无需处理。"
                 ],
                 autoupdate_stopped=state.autoupdate_stopped,
+                nag_silenced=state.nag_silenced,
             )
 
-        sites = (
-            [s for s in build_sites(
-                state.days or C.DEFAULT_DAYS, include_autoupdate=True)
-             if s.name.startswith(("补丁 D", "补丁 E"))]
-            if want_d else []
-        )
+        # 已就位的站点不需要重复构造：下面按名字各自筛选，写前还有一次
+        # 「已是目标状态就跳过」的比对。
+        sites = [
+            s for s in build_sites(
+                state.days or C.DEFAULT_DAYS,
+                include_autoupdate=True, silence_nag=True)
+            if (want_d and s.name.startswith(("补丁 D", "补丁 E")))
+            or (want_f and s.name.startswith("补丁 F"))
+        ]
     else:
         # 白名单：只接受未被改动的官方文件。
         #
@@ -513,7 +615,8 @@ def _apply_patch_impl(
             days = state.days
 
         want_d = cancel_autoupdate
-        sites = build_sites(days, include_autoupdate=want_d)
+        want_f = silence_nag
+        sites = build_sites(days, include_autoupdate=want_d, silence_nag=want_f)
 
     pending: list[Site] = []
     for site in sites:
@@ -531,6 +634,7 @@ def _apply_patch_impl(
             sha_before=sha_before, sha_after=sha_before, backup=None,
             lines=lines + ["各补丁站点均已就位，无写入。"],
             autoupdate_stopped=state.autoupdate_stopped,
+            nag_silenced=state.nag_silenced,
         )
 
     # 备份只在首次生成，保留最原始的那一份。
@@ -561,12 +665,16 @@ def _apply_patch_impl(
     else:
         lines.append(f"PE 校验和 0x{cs_old:08X} 本来就自洽，无需改动")
 
-    if not pending:
+    # 站点全部就位**且**校验和自洽，才是真正的无事可做。校验和过期时即使
+    # 没有站点要写，也要把重算结果落盘一次 —— 老版本工具只改字节不重算校验
+    # 和，README 向用户承诺过「再点一次激活即可补齐」，兑现的就是这里。
+    if not pending and cs_old == cs_new:
         return PatchResult(
             ok=True, changed=False, days=days,
             sha_before=sha_before, sha_after=sha_before, backup=None,
             lines=lines + ["没有需要写入的改动。"],
             autoupdate_stopped=state.autoupdate_stopped,
+            nag_silenced=state.nag_silenced,
         )
 
     exe.write_bytes(bytes(buf))
@@ -603,12 +711,20 @@ def _apply_patch_impl(
                 f"请用备份还原：{backup_path}"
             )
 
+    # 催购弹窗的补丁同理：写完了就必须是真的静默了。
+    if want_f and (after.site_f is None or after.site_f.state != APPLIED):
+        raise PatchError(
+            "催购弹窗入口（补丁 F）写入后回读不通过，函数入口没有改变。\n"
+            f"请用备份还原：{backup_path}"
+        )
+
     return PatchResult(
         ok=True, changed=True, days=days,
         sha_before=sha_before, sha_after=sha256_of(verify),
         backup=backup_path if backup_made else backup_path,
         lines=lines,
         autoupdate_stopped=after.autoupdate_stopped,
+        nag_silenced=after.nag_silenced,
     )
 
 

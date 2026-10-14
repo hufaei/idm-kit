@@ -82,6 +82,15 @@ def _friendly_result(action: str, result) -> str:
                 "但自动更新还有一处没能关掉，IDM 仍有可能联网检查新版本。\n"
                 "建议点「导出诊断」把结果发出来。")
 
+    if action == "silence-nag":
+        if result.nag_silenced:
+            return ("以后添加下载不会再弹「试用结束，请购买」的提示了。\n\n"
+                    "它本来就不影响下载，只是催购；关掉图个清净。\n"
+                    "想核对改动细节，点「导出诊断」。")
+        return ("处理已完成。\n\n"
+                "但催购弹窗的改写点没能确认，可能还会弹。\n"
+                "建议点「导出诊断」把结果发出来。")
+
     # 「激活」
     return (f"IDM 已激活，可以正常下载。\n\n"
             f"不会再出现试用到期（上限 {days} 天）。\n"
@@ -95,6 +104,8 @@ def _done_text(action: str) -> str:
     """
     if action == "cancel-update":
         return ("IDM 不会再自动检查更新了，\n以后也不会被新版本覆盖掉。")
+    if action == "silence-nag":
+        return ("以后添加下载不会再弹「试用结束」的催购提示了。")
     if action == "restore":
         return ("已还原成官方原版。\n\n"
                 "注意：试用期限制和自动更新也一起恢复成官方状态了。")
@@ -104,6 +115,8 @@ def _done_text(action: str) -> str:
 def _title_for(action: str, done: bool) -> str:
     if action == "cancel-update":
         return "自动更新已关闭" if done else "取消自动更新"
+    if action == "silence-nag":
+        return "催购弹窗已静默" if done else "静默催购弹窗"
     if action == "restore":
         return "已还原" if done else "还原官方版"
     return "已激活" if done else "激活"
@@ -275,7 +288,7 @@ class App(tk.Tk):
         bar.grid(row=3, column=0, sticky="ew", padx=18)
         # 中间一列吃掉多余宽度，把两组按钮分别推到最左和最右。用 grid 而不是
         # pack(side=...)，是为了让左右分组由明确的列号决定，不依赖创建顺序。
-        bar.columnconfigure(2, weight=1)
+        bar.columnconfigure(4, weight=1)
 
         # 按「对 IDM 做处理」和「围绕使用」分成左右两组，中间留空。六个按钮
         # 平铺一排时，使用者要读完每个才能找到要点的那个；分组之后位置固定：
@@ -285,15 +298,18 @@ class App(tk.Tk):
         # 特意与「激活」分开：关掉自动更新是使用者的选择，不该在激活时顺手做掉。
         self.btn_cancel_update = self._action_button(
             bar, 1, "取消自动更新", self.do_cancel_update)
+        # 与「取消自动更新」同理：催购弹窗不影响下载，关不关由使用者决定。
+        self.btn_silence_nag = self._action_button(
+            bar, 2, "静默催购弹窗", self.do_silence_nag)
         self.btn_restore = self._action_button(
-            bar, 2, "还原官方版", self.do_restore)
+            bar, 3, "还原官方版", self.do_restore)
 
         self.btn_export = self._action_button(
-            bar, 4, "导出诊断", self.do_export)
+            bar, 5, "导出诊断", self.do_export)
         self.btn_start = self._action_button(
-            bar, 5, "启动 IDM", self.do_start)
+            bar, 6, "启动 IDM", self.do_start)
         self.btn_stop = self._action_button(
-            bar, 6, "关闭 IDM", self.do_stop)
+            bar, 7, "关闭 IDM", self.do_stop)
 
     def _action_button(self, parent, col: int, text, cmd,
                        primary=False) -> tk.Button:
@@ -439,6 +455,14 @@ class App(tk.Tk):
             state="disabled" if stopped else ("normal" if installed else "disabled"),
         )
 
+        # 「静默催购弹窗」与上面同一套状态呈现逻辑。
+        silenced = bool(self.diag is not None
+                        and self.diag.context.get("nag_silenced"))
+        self.btn_silence_nag.configure(
+            text="✓ 静默催购弹窗" if silenced else "静默催购弹窗",
+            state="disabled" if silenced else ("normal" if installed else "disabled"),
+        )
+
         # 判据以进程枚举为主，端口不能当作 IDM 在运行的证据 —— 1001 由
         # IDMWFP 驱动常驻占用，驱动在就一直在监听。详见 runtime.idm_running()。
         running = runtime.idm_running()[0]
@@ -516,6 +540,22 @@ class App(tk.Tk):
             return
         self._run_inline_action("cancel-update")
 
+    def do_silence_nag(self) -> None:
+        if self.exe is None:
+            return
+        if not messagebox.askokcancel(
+            "静默催购弹窗",
+            "未注册状态下，IDM 每次添加下载都会弹一次「试用结束，请购买」"
+            "的置顶提示。\n\n"
+            "它不影响下载，纯粹是催购；这个动作会把生成弹窗的函数入口改成"
+            "直接返回，两条催购文案（含假序列号警告）一并静默。\n\n"
+            "处理前需要先关闭 IDM（如果正在运行）。\n"
+            "这个改动独立于「激活」。\n"
+            "过程中可能弹出一次管理员授权，请点「是」。",
+        ):
+            return
+        self._run_inline_action("silence-nag")
+
     def _is_official_bak(self) -> bool:
         """备份是不是真正的官方原版。
 
@@ -543,12 +583,10 @@ class App(tk.Tk):
         if exe is None:
             return
 
-        label = {"patch": "激活", "restore": "还原官方版",
-                 "cancel-update": "取消自动更新"}.get(action, action)
         days = C.DEFAULT_DAYS
 
-        # 「取消自动更新」既要能在激活过的文件上补打，也要能独立使用，所以
-        # 只有它带 cancel_autoupdate=True；「激活」不动自动更新。
+        # 「取消自动更新」「静默催购弹窗」既要能在激活过的文件上补打，也要能
+        # 独立使用，所以只有它们带各自的开关；「激活」两个都不动。
         if action == "restore":
             official = self._is_official_bak()
 
@@ -559,7 +597,9 @@ class App(tk.Tk):
                     result = patch.restore(exe)
                 else:
                     result = patch.apply_patch(
-                        exe, days, cancel_autoupdate=(action == "cancel-update"))
+                        exe, days,
+                        cancel_autoupdate=(action == "cancel-update"),
+                        silence_nag=(action == "silence-nag"))
             except Exception as exc:
                 messagebox.showerror("失败", str(exc))
                 return
@@ -595,6 +635,14 @@ class App(tk.Tk):
                     "没能完全关掉",
                     "试用期限制已经处理好了。\n\n"
                     "但自动更新还有一处没能关掉，IDM 仍有可能联网检查新版本。\n"
+                    "建议点「导出诊断」把结果发出来。\n\n"
+                    f"技术细节：\n{detail}",
+                )
+            elif action == "silence-nag" and not result.nag_silenced:
+                detail = "\n".join(f"　{line}" for line in result.lines)
+                messagebox.showwarning(
+                    "没能静默",
+                    "处理已完成，但催购弹窗的改写点没能确认，可能还会弹。\n"
                     "建议点「导出诊断」把结果发出来。\n\n"
                     f"技术细节：\n{detail}",
                 )

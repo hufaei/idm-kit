@@ -43,6 +43,8 @@ def main() -> int:
     print("--- 按钮可用性 ---")
     for name, btn in [
         ("激活", app.btn_patch),
+        ("取消自动更新", app.btn_cancel_update),
+        ("静默催购弹窗", app.btn_silence_nag),
         ("还原官方版", app.btn_restore),
         ("导出诊断", app.btn_export),
         ("启动 IDM", app.btn_start),

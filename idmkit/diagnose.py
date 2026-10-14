@@ -431,6 +431,53 @@ def _check_update(state: patch.PatchState | None) -> Check:
     )
 
 
+def _check_nag(state: patch.PatchState | None) -> Check:
+    """催购弹窗：与激活、自动更新并列的第三件可做的事。
+
+    未注册状态下 IDM 每次添加下载都会弹「试用结束，请购买」的置顶框。它与
+    试用上限是两套独立机制 —— 上限补丁全绿它也照弹，使用者容易误以为激活
+    失败，所以单独列一项把话说清楚。
+    """
+    if state is None:
+        return Check(
+            "nag", "催购弹窗", STATUS_INFO,
+            fact="读不到 IDMan.exe，暂时无法判断",
+            meaning="文件读不出来，也就无法确认催购弹窗是否已被静默",
+            action="确认文件权限后点「刷新」",
+        )
+
+    if state.nag_silenced:
+        return Check(
+            "nag", "催购弹窗", STATUS_OK,
+            fact="已静默　添加下载时不会再弹「试用结束，请购买」",
+            meaning="生成弹窗的函数入口已被改成直接返回，两条催购文案一并失效",
+            detail="两个催购分派器入口 = 0xC3（直接返回）",
+        )
+
+    if state.nag_known:
+        return Check(
+            "nag", "催购弹窗", STATUS_WARN,
+            fact="未注册状态下每次添加下载都会弹「试用结束」的置顶提示，约 10 分钟还会再弹一次",
+            meaning=(
+                "这是催购提示，不影响下载；但也容易让人误以为激活没成功。"
+                "它与试用上限是两套独立机制，上限补丁对它无效"
+            ),
+            action="嫌它烦就点「静默催购弹窗」，几秒钟完成",
+            detail="催购分派器入口 = 0x6A（原样，弹窗照常；两个分派器任一未改都会弹）",
+        )
+
+    return Check(
+        "nag", "催购弹窗", STATUS_INFO,
+        fact="这个版本的 IDM 无法处理",
+        meaning=(
+            "当前 IDM 不是本工具支持的版本，工具不会做任何修改，"
+            "以免改错地方"
+        ),
+        action="确认 IDM 版本；需要帮助时点「导出诊断」",
+        detail="催购弹窗入口无法定位（版本可能不符）",
+    )
+
+
 def _check_process(
     procs: list[runtime.ProcInfo],
 ) -> tuple[Check, runtime.ProcInfo | None]:
@@ -670,6 +717,7 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
     checks.append(_check_days(state.days if state else None))
     checks.append(_check_autoupdate(state))
     checks.append(_check_update(state))
+    checks.append(_check_nag(state))
 
     procs = runtime.running_processes()
     total = runtime.total_process_count()
@@ -711,7 +759,14 @@ def diagnose(exe: Path | None = None) -> Diagnosis:
         if state.site_e is not None:
             ctx["site_e"] = state.site_e.state
             ctx["site_e_offset"] = state.site_e.offset
+        if state.site_f is not None:
+            ctx["site_f"] = state.site_f.state
+            ctx["site_f_offset"] = state.site_f.offset
+        if state.site_f2 is not None:
+            ctx["site_f2"] = state.site_f2.state
+            ctx["site_f2_offset"] = state.site_f2.offset
         ctx["autoupdate_stopped"] = state.autoupdate_stopped
+        ctx["nag_silenced"] = state.nag_silenced
     auto = runtime.autoupdate_state()
     ctx["reg_last_check_qu"] = auto.last_check_qu
     ctx["reg_last_check_date"] = auto.last_check_date
